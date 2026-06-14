@@ -112,23 +112,12 @@ files on that machine. So:
 
 ---
 
-## Run from source (developers)
+## For developers
 
-```powershell
-# 1. Install: venv + Python deps + bundle the Dev Tunnel CLI into tools/
-.\scripts\install.ps1
+> The supported way to run CopilotBridge is the **one-click installer** above.
+> Running the raw server from source is not recommended for normal use.
 
-# 2. Configure
-Copy-Item server\.env.example server\.env   # then set a strong CHAT_API_TOKEN
-
-# 3. One-time Dev Tunnel sign-in
-.\tools\devtunnel.exe user login
-
-# 4. Start server + tunnel together (staged startup logs)
-.\scripts\run.ps1
-```
-
-Build the installer yourself: `.\scripts\build-installer.ps1 -Version x.y.z`
+Build the installer from source: `.\scripts\build-installer.ps1 -Version x.y.z`
 (produces `dist\CopilotBridgeServer-x.y.z-setup.exe`).
 
 ### Repository layout
