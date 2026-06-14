@@ -1,0 +1,4 @@
+# Shared bundle identifier for the Copilot Bridge mobile app (Android + iOS).
+# Authentication uses an App Store Connect API key passed at runtime by the
+# `beta` lane, so no apple_id / team_id is required here.
+app_identifier("com.copilotbridge.client")

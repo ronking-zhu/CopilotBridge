@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>
+		<integer>2</integer>
+	</array>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>XSAppIconAssets</key>
+	<string>Assets.xcassets/appicon.appiconset</string>
+	<!--
+		Standard HTTPS/TLS only (no proprietary or non-standard cryptography), so
+		the app qualifies for the export-compliance exemption. Declaring this here
+		lets every TestFlight/App Store build skip the manual "export compliance"
+		question that would otherwise block testers on each upload.
+	-->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<!--
+		App Transport Security: keep TLS enforced for internet hosts (so the Dev
+		Tunnel https URL is used securely), but permit cleartext to local hosts
+		(localhost / 127.0.0.1 / *.local) so http://localhost:3978 works in the
+		iOS Simulator against the Mac host. Mirrors the Android cleartext policy.
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!-- Required when the app talks to devices/hosts on the local network. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Connects to your Copilot Bridge server running on your local network.</string>
+</dict>
+</plist>

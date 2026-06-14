@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#0d1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Copilot">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.svg">
+<title>Copilot Bridge</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#21262d; --border:#30363d;
+    --text:#e6edf3; --muted:#8b949e; --accent:#2f81f7; --user:#1f6feb; --err:#f85149;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--text);
+    font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    display:flex; flex-direction:column;
+    height:100dvh;
+  }
+  header{
+    display:flex; align-items:center; gap:8px;
+    padding:calc(env(safe-area-inset-top) + 10px) 12px 10px;
+    background:var(--panel); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:5;
+  }
+  header .logo{font-family:ui-monospace,Menlo,Consolas,monospace; color:var(--accent); font-weight:700}
+  header h1{font-size:16px; margin:0; flex:1; font-weight:600}
+  header button{
+    background:var(--panel2); color:var(--text); border:1px solid var(--border);
+    border-radius:8px; padding:7px 10px; font-size:13px; cursor:pointer;
+  }
+  header button:active{background:#2d333b}
+  #log{flex:1; overflow-y:auto; padding:14px 12px 8px; -webkit-overflow-scrolling:touch}
+  .msg{margin:10px 0; display:flex}
+  .msg.user{justify-content:flex-end}
+  .bubble{
+    max-width:86%; padding:10px 13px; border-radius:14px; white-space:pre-wrap; word-wrap:break-word;
+    border:1px solid var(--border); background:var(--panel);
+  }
+  .user .bubble{background:var(--user); border-color:var(--user); color:#fff; border-bottom-right-radius:4px}
+  .bot .bubble{border-bottom-left-radius:4px}
+  .err .bubble{border-color:var(--err); color:var(--err)}
+  .bubble pre{
+    background:#0b0f14; border:1px solid var(--border); border-radius:8px; padding:10px;
+    overflow-x:auto; margin:6px 0; font:13px/1.45 ui-monospace,Menlo,Consolas,monospace; white-space:pre;
+  }
+  .bubble code{font-family:ui-monospace,Menlo,Consolas,monospace; background:#0b0f14; padding:1px 5px; border-radius:5px}
+  .meta{font-size:11px; color:var(--muted); margin:2px 4px}
+  .think{color:var(--muted); font-style:italic}
+  form{
+    display:flex; flex-wrap:wrap; gap:8px; padding:8px 10px calc(env(safe-area-inset-bottom) + 8px);
+    background:var(--panel); border-top:1px solid var(--border);
+  }
+  textarea{
+    flex:1; resize:none; max-height:140px; min-height:44px;
+    background:var(--bg); color:var(--text); border:1px solid var(--border);
+    border-radius:12px; padding:11px 12px; font:16px/1.4 inherit;
+  }
+  textarea:focus{outline:none; border-color:var(--accent)}
+  #send{
+    background:var(--accent); color:#fff; border:none; border-radius:12px;
+    padding:0 18px; font-size:16px; font-weight:600; cursor:pointer;
+  }
+  #send:disabled{opacity:.5}
+  /* image attachments */
+  #attachBtn{
+    background:var(--panel2); color:var(--text); border:1px solid var(--border);
+    border-radius:12px; padding:0 14px; font-size:18px; cursor:pointer; min-height:44px;
+  }
+  #attachBtn:active{background:#2d333b}
+  #fileInput{display:none}
+  #previews{display:flex; flex-wrap:wrap; gap:8px; flex-basis:100%; order:-1}
+  #previews:empty{display:none}
+  .pthumb{position:relative; width:64px; height:64px; border-radius:10px; overflow:hidden; border:1px solid var(--border); background:var(--bg)}
+  .pthumb img{width:100%; height:100%; object-fit:cover; display:block}
+  .pthumb .x{
+    position:absolute; top:2px; right:2px; width:20px; height:20px; line-height:18px; text-align:center;
+    background:rgba(0,0,0,.6); color:#fff; border:none; border-radius:50%; font-size:12px; cursor:pointer; padding:0;
+  }
+  .bubble .thumbs{display:flex; flex-wrap:wrap; gap:6px; margin:0 0 6px}
+  .bubble .thumbs.only{margin:0}
+  .bubble .thumbs a{display:block; width:180px; max-width:60vw}
+  .bubble .thumbs img{width:100%; border-radius:10px; border:1px solid var(--border); display:block}
+  .modal{
+    position:fixed; inset:0; background:rgba(0,0,0,.6); display:none;
+    align-items:center; justify-content:center; padding:20px; z-index:20;
+  }
+  .modal.show{display:flex}
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px; width:100%; max-width:420px}
+  .card h2{margin:0 0 12px; font-size:17px}
+  .card label{display:block; font-size:13px; color:var(--muted); margin:12px 0 5px}
+  .card input{width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:9px; padding:10px}
+  .card .row{display:flex; gap:8px; margin-top:16px}
+  .card .row button{flex:1; padding:10px; border-radius:9px; border:1px solid var(--border); background:var(--panel2); color:var(--text); font-size:14px}
+  .card .row button.primary{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600}
+  .hint{font-size:12px; color:var(--muted); margin-top:10px}
+
+  /* sessions drawer */
+  #scrim{position:fixed; inset:0; background:rgba(0,0,0,.5); display:none; z-index:14}
+  #scrim.show{display:block}
+  #drawer{
+    position:fixed; top:0; left:0; bottom:0; width:82%; max-width:320px; z-index:15;
+    background:var(--panel); border-right:1px solid var(--border);
+    transform:translateX(-100%); transition:transform .22s ease; display:flex; flex-direction:column;
+    padding-top:env(safe-area-inset-top);
+  }
+  #drawer.show{transform:none}
+  #drawer .dhead{display:flex; align-items:center; gap:8px; padding:14px 12px; border-bottom:1px solid var(--border)}
+  #drawer .dhead h2{font-size:15px; margin:0; flex:1}
+  #drawer .dnew{background:var(--accent); color:#fff; border:none; border-radius:8px; padding:8px 10px; font-size:13px; font-weight:600}
+  #drawer .dnew.dghost{background:var(--panel2); color:var(--text); border:1px solid var(--border); font-weight:500}
+  #slist{flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch}
+  .sback{display:flex; align-items:center; gap:8px; padding:11px 12px; border-bottom:1px solid var(--border); color:var(--accent); font-size:14px; cursor:pointer; background:var(--panel2)}
+  .snote{padding:10px 12px; font-size:12px; color:var(--muted); border-bottom:1px solid var(--border)}
+  .ssearch{padding:8px 10px; border-bottom:1px solid var(--border)}
+  .ssearch input{width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:9px; padding:9px 11px; font:14px/1.3 inherit; -webkit-appearance:none}
+  .ssearch input:focus{outline:none; border-color:var(--accent)}
+  .sitem{display:flex; align-items:center; gap:8px; padding:12px; border-bottom:1px solid var(--border); cursor:pointer}
+  .sitem.active{background:var(--panel2)}
+  .sitem .stitle{flex:1; min-width:0}
+  .sitem .stitle .t{font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .sitem .stitle .sub{font-size:11px; color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .sitem .del{background:none; border:none; color:var(--muted); font-size:16px; padding:4px 6px; cursor:pointer}
+  .sitem .del:active{color:var(--err)}
+  .sitem .imp{background:none; border:1px solid var(--border); border-radius:7px; color:var(--accent); font-size:12px; padding:5px 9px; cursor:pointer; white-space:nowrap}
+
+  /* markdown */
+  .bubble h1,.bubble h2,.bubble h3,.bubble h4{margin:.5em 0 .3em; line-height:1.25}
+  .bubble h1{font-size:1.3em} .bubble h2{font-size:1.18em} .bubble h3{font-size:1.07em} .bubble h4{font-size:1em}
+  .bubble p{margin:.4em 0}
+  .bubble ul,.bubble ol{margin:.4em 0; padding-left:1.4em}
+  .bubble li{margin:.15em 0}
+  .bubble blockquote{margin:.4em 0; padding:.2em .8em; border-left:3px solid var(--border); color:var(--muted)}
+  .bubble hr{border:none; border-top:1px solid var(--border); margin:.6em 0}
+  .bubble a{color:var(--accent)}
+  .bubble table{border-collapse:collapse; margin:.5em 0; width:100%; font-size:13px; display:block; overflow-x:auto}
+  .bubble th,.bubble td{border:1px solid var(--border); padding:5px 8px; text-align:left}
+  .bubble th{background:var(--panel2)}
+  .think .t{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<header>
+  <button id="menuBtn" title="会话列表" aria-label="会话列表">☰</button>
+  <span class="logo">&gt;_</span>
+  <h1>Copilot Bridge</h1>
+  <button id="setBtn" title="设置">⚙</button>
+</header>
+
+<div id="scrim"></div>
+<aside id="drawer">
+  <div class="dhead">
+    <h2>会话</h2>
+    <button class="dnew dghost" id="importBtn" title="从 Copilot 导入历史会话">📥 Copilot</button>
+    <button class="dnew" id="newBtn">＋ 新会话</button>
+  </div>
+  <div id="slist"></div>
+</aside>
+
+<div id="log"></div>
+
+<form id="form">
+  <div id="previews"></div>
+  <button id="attachBtn" type="button" title="添加图片" aria-label="添加图片">📎</button>
+  <input id="fileInput" type="file" accept="image/*" multiple>
+  <textarea id="input" placeholder="给 Copilot agent 下指令…" autocomplete="off"></textarea>
+  <button id="send" type="submit">发送</button>
+</form>
+
+<div class="modal" id="modal">
+  <div class="card">
+    <h2>设置</h2>
+    <label>服务器地址（默认当前地址，一般不用改）</label>
+    <input id="baseInput" placeholder="https://xxx-3978.xxx.devtunnels.ms">
+    <label>API Token</label>
+    <input id="tokenInput" type="password" placeholder="粘贴 .env 里的 CHAT_API_TOKEN">
+    <div class="row">
+      <button id="cancelBtn" type="button">取消</button>
+      <button id="saveBtn" type="button" class="primary">保存</button>
+    </div>
+    <div class="hint">指令会在你的电脑上由 Copilot CLI 执行（默认限制在 workspace/ 沙箱）。Token 用于保护公网隧道，别外泄。</div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const log = $('#log'), input = $('#input'), form = $('#form'), sendBtn = $('#send');
+const drawer = $('#drawer'), scrim = $('#scrim'), slist = $('#slist');
+const fileInput = $('#fileInput'), previews = $('#previews'), attachBtn = $('#attachBtn');
+
+let base  = (localStorage.getItem('cb_base')  || location.origin).replace(/\/$/,'');
+let token = localStorage.getItem('cb_token') || '';
+let sid   = localStorage.getItem('cb_sid') || '';
+let sessions = [];
+let copilotSessions = [];   // cache of the Copilot-CLI native list, for client-side search
+let pending = [];           // images picked but not yet sent: [{name, mime, dataUrl, b64}]
+
+function hdr(){ return {'Content-Type':'application/json','X-API-Key':token,'X-Tunnel-Skip-AntiPhishing-Page':'true'}; }
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+function scroll(){ log.scrollTop = log.scrollHeight; }
+
+async function api(method, path, body){
+  const opt = { method, headers: hdr() };
+  if(body !== undefined) opt.body = JSON.stringify(body);
+  const r = await fetch(base + path, opt);
+  if(r.status === 401){ openModal(); throw new Error('unauthorized'); }
+  if(!r.ok) throw new Error('HTTP ' + r.status);
+  const ct = r.headers.get('content-type') || '';
+  return ct.includes('json') ? r.json() : r.text();
+}
+
+/* ---------- markdown (GFM subset, matches the native clients) ---------- */
+function inline(s){
+  s = esc(s);
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (m,c)=>{ codes.push('<code>'+c+'</code>'); return '\u0000C'+(codes.length-1)+'\u0000'; });
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m,t,u)=> /^(https?:|mailto:)/i.test(u) ? '<a href="'+u+'" target="_blank" rel="noopener">'+t+'</a>' : m);
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  s = s.replace(/\u0000C(\d+)\u0000/g, (m,n)=>codes[+n]);
+  return s;
+}
+function mdToHtml(src){
+  const blocks = [];
+  src = String(src).replace(/```([\s\S]*?)```/g, (m, code) => {
+    code = code.replace(/^[^\n]*\n/, '');               // drop the ```lang line
+    blocks.push('<pre>' + esc(code.replace(/\n$/,'')) + '</pre>');
+    return '\u0000B' + (blocks.length-1) + '\u0000';
+  });
+  const lines = src.split('\n');
+  let html = '', i = 0;
+  const isBreak = l => /^\s*$/.test(l) || /^\u0000B\d+\u0000$/.test(l) || /^(#{1,6})\s/.test(l)
+    || /^\s*>\s?/.test(l) || /^\s*([-*+]|\d+\.)\s+/.test(l) || /^\s*([-*_])\1{2,}\s*$/.test(l);
+  while(i < lines.length){
+    const line = lines[i];
+    const ph = line.match(/^\u0000B(\d+)\u0000$/);
+    if(ph){ html += blocks[+ph[1]]; i++; continue; }
+    if(/^\s*$/.test(line)){ i++; continue; }
+    if(/^\s*([-*_])\1{2,}\s*$/.test(line)){ html += '<hr>'; i++; continue; }
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if(h){ const n = h[1].length; html += '<h'+n+'>' + inline(h[2]) + '</h'+n+'>'; i++; continue; }
+    if(/^\s*>\s?/.test(line)){
+      const buf = [];
+      while(i<lines.length && /^\s*>\s?/.test(lines[i])){ buf.push(lines[i].replace(/^\s*>\s?/,'')); i++; }
+      html += '<blockquote>' + inline(buf.join('\n')).replace(/\n/g,'<br>') + '</blockquote>'; continue;
+    }
+    if(line.includes('|') && i+1<lines.length && /-/.test(lines[i+1]) && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i+1])){
+      const row = r => r.replace(/^\s*\|/,'').replace(/\|\s*$/,'').split('|').map(c=>c.trim());
+      const head = row(line); i += 2;
+      let t = '<table><thead><tr>' + head.map(c=>'<th>'+inline(c)+'</th>').join('') + '</tr></thead><tbody>';
+      while(i<lines.length && lines[i].includes('|') && !/^\s*$/.test(lines[i])){
+        t += '<tr>' + row(lines[i]).map(c=>'<td>'+inline(c)+'</td>').join('') + '</tr>'; i++;
+      }
+      html += t + '</tbody></table>'; continue;
+    }
+    if(/^\s*([-*+]|\d+\.)\s+/.test(line)){
+      const ordered = /^\s*\d+\.\s+/.test(line), tag = ordered ? 'ol' : 'ul';
+      let l = '<'+tag+'>';
+      while(i<lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])){
+        l += '<li>' + inline(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/,'')) + '</li>'; i++;
+      }
+      html += l + '</'+tag+'>'; continue;
+    }
+    const buf = [line]; i++;
+    while(i<lines.length && !isBreak(lines[i])){ buf.push(lines[i]); i++; }
+    html += '<p>' + inline(buf.join('\n')).replace(/\n/g,'<br>') + '</p>';
+  }
+  return html;
+}
+
+/* ---------- messages ---------- */
+function addMsg(kind, text, images){
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ' + kind;
+  const b = document.createElement('div');
+  b.className = 'bubble';
+  let html = '';
+  if(images && images.length){
+    html += '<div class="thumbs' + (text ? '' : ' only') + '">' + images.map(im =>
+      '<a href="' + im.src + '" target="_blank" rel="noopener"><img alt="' + esc(im.name || '') + '" src="' + im.src + '"></a>'
+    ).join('') + '</div>';
+  }
+  if(text) html += (kind === 'bot') ? mdToHtml(text) : esc(text).replace(/\n/g,'<br>');
+  b.innerHTML = html;
+  wrap.appendChild(b); log.appendChild(wrap); scroll();
+  return wrap;
+}
+
+/* ---------- image attachments ---------- */
+// Build an authorized URL for a stored attachment so a plain <img> can load it
+// (img tags can't send the X-API-Key header, so the server also accepts ?key=).
+function attUrl(a){
+  let u = base + a.url;
+  if(token) u += (u.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(token);
+  return u;
+}
+function fileToDataUrl(file){
+  return new Promise((res, rej)=>{
+    const r = new FileReader();
+    r.onload = ()=> res(r.result);
+    r.onerror = ()=> rej(r.error || new Error('read failed'));
+    r.readAsDataURL(file);
+  });
+}
+function splitDataUrl(dataUrl){
+  const i = dataUrl.indexOf(',');
+  const head = dataUrl.slice(0, i);
+  const b64 = dataUrl.slice(i + 1);
+  const mime = (head.match(/data:([^;]+)/) || [])[1] || 'image/png';
+  return { mime, b64 };
+}
+function renderPending(){
+  previews.innerHTML = '';
+  pending.forEach((p, idx)=>{
+    const d = document.createElement('div');
+    d.className = 'pthumb';
+    d.innerHTML = '<img alt=""><button class="x" title="移除" type="button">✕</button>';
+    d.querySelector('img').src = p.dataUrl;
+    d.querySelector('.x').onclick = ()=>{ pending.splice(idx, 1); renderPending(); updateSendEnabled(); };
+    previews.appendChild(d);
+  });
+}
+function updateSendEnabled(){
+  sendBtn.disabled = !(input.value.trim() || pending.length);
+}
+async function addFiles(files){
+  for(const f of files){
+    if(!f.type || !f.type.startsWith('image/')) continue;
+    try{
+      const dataUrl = await fileToDataUrl(f);
+      const { mime, b64 } = splitDataUrl(dataUrl);
+      pending.push({ name: f.name || ('image.' + ((mime.split('/')[1]) || 'png')), mime, dataUrl, b64 });
+    }catch(e){ /* skip unreadable file */ }
+  }
+  renderPending(); updateSendEnabled();
+}
+function addThinking(start){
+  const wrap = document.createElement('div');
+  wrap.className = 'msg bot';
+  wrap.innerHTML = '<div class="bubble think"></div>';
+  log.appendChild(wrap); scroll();
+  wrap._t0 = Date.now();
+  wrap._queued = !!(start && start.status === 'queued' && (start.queuePosition||0) > 0);
+  wrap._qpos = start ? (start.queuePosition||0) : 0;
+  const fmtDur = (ms)=>{
+    const s = Math.round(ms/1000);
+    if(s < 60) return s + 's';
+    const m = Math.floor(s/60);
+    if(m < 60) return m + 'm ' + (s%60) + 's';
+    return Math.floor(m/60) + 'h ' + (m%60) + 'm';
+  };
+  const paint = ()=>{
+    const el = wrap.querySelector('.bubble'); if(!el) return;
+    if(wrap._queued && wrap._qpos > 0){ el.textContent = '⏳ 排队中… 前面还有 ' + wrap._qpos + ' 个请求'; return; }
+    const ms = Date.now() - wrap._t0;
+    // No timeout: Copilot is given as long as it needs. Show elapsed time, and for
+    // long tasks reassure the user that waiting (or leaving) is fine.
+    let html = '🤖 Copilot 正在工作… <span class="t">' + fmtDur(ms) + '</span>';
+    if(ms > 60000)
+      html += '<div style="font-size:12px;color:var(--muted);margin-top:6px">'
+        + '长任务执行中，无需关闭页面；即使离开，结果也会保存到本会话。</div>';
+    el.innerHTML = html;
+  };
+  paint();
+  const timer = setInterval(paint, 1000);
+  wrap._stop = ()=> clearInterval(timer);
+  wrap._update = (st)=>{
+    const was = wrap._queued;
+    wrap._queued = (st.status === 'queued' && (st.queuePosition||0) > 0);
+    wrap._qpos = st.queuePosition || 0;
+    if(was && !wrap._queued) wrap._t0 = Date.now();   // restart the think timer when it leaves the queue
+    paint();
+  };
+  return wrap;
+}
+
+/* ---------- sessions ---------- */
+function relTime(ts){
+  if(!ts) return '';
+  const sec = ts > 1e12 ? ts/1000 : ts;
+  const d = Math.max(0, Date.now()/1000 - sec);
+  if(d < 60) return '刚刚';
+  if(d < 3600) return Math.floor(d/60) + ' 分钟前';
+  if(d < 86400) return Math.floor(d/3600) + ' 小时前';
+  return Math.floor(d/86400) + ' 天前';
+}
+function renderSessions(){
+  slist.innerHTML = '';
+  if(!sessions.length){ slist.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:13px">还没有会话，点上面「新会话」开始。</div>'; return; }
+  for(const s of sessions){
+    const item = document.createElement('div');
+    item.className = 'sitem' + (s.id === sid ? ' active' : '');
+    const title = (s.title && s.title.trim()) ? s.title : '未命名会话';
+    item.innerHTML = '<div class="stitle"><div class="t"></div><div class="sub">'
+      + relTime(s.updatedAt) + ' · ' + (s.messageCount||0) + ' 条</div></div>'
+      + '<button class="del" title="删除">🗑</button>';
+    item.querySelector('.t').textContent = title;
+    item.querySelector('.stitle').onclick = ()=> openSession(s.id);
+    item.querySelector('.del').onclick = (e)=>{ e.stopPropagation(); delSession(s.id, title); };
+    slist.appendChild(item);
+  }
+}
+async function loadSessions(){
+  try{ sessions = await api('GET','/api/sessions') || []; }
+  catch(e){ sessions = []; }
+  renderSessions();
+}
+
+/* ---------- import from Copilot CLI native sessions ---------- */
+function shortRepo(s){
+  if(s.repository) return s.repository;
+  if(s.cwd){ const parts = s.cwd.replace(/[\\/]+$/,'').split(/[\\/]/); return parts[parts.length-1] || s.cwd; }
+  return '';
+}
+function renderCopilotSessions(list){
+  copilotSessions = list || [];
+  slist.innerHTML = '';
+  const back = document.createElement('div');
+  back.className = 'sback';
+  back.innerHTML = '← 返回本地会话';
+  back.onclick = ()=> loadSessions();
+  slist.appendChild(back);
+  const note = document.createElement('div');
+  note.className = 'snote';
+  note.textContent = '这些是电脑上 Copilot CLI 的历史会话，点「导入」即可加载它的全部对话。';
+  slist.appendChild(note);
+  // Search box: filters by title + repo/folder. Only the #cplist below re-renders
+  // on each keystroke, so the input keeps focus while typing.
+  const box = document.createElement('div');
+  box.className = 'ssearch';
+  box.innerHTML = '<input id="cpsearch" type="search" placeholder="🔍 搜索会话（标题 / 仓库）" autocomplete="off" autocapitalize="off" autocorrect="off">';
+  slist.appendChild(box);
+  const wrap = document.createElement('div');
+  wrap.id = 'cplist';
+  slist.appendChild(wrap);
+  const input = box.querySelector('#cpsearch');
+  input.addEventListener('input', ()=> renderCopilotItems(input.value));
+  renderCopilotItems('');
+}
+function renderCopilotItems(query){
+  const wrap = document.getElementById('cplist');
+  if(!wrap) return;
+  wrap.innerHTML = '';
+  if(!copilotSessions.length){ wrap.innerHTML = '<div class="snote">没有发现 Copilot 会话。</div>'; return; }
+  const q = (query || '').trim().toLowerCase();
+  const srcLabel = s => s.source === 'vscode' ? 'vscode vs code' : (s.source === 'cli' ? 'cli' : '');
+  const items = q
+    ? copilotSessions.filter(s => ((s.title || '') + ' ' + shortRepo(s) + ' ' + srcLabel(s)).toLowerCase().includes(q))
+    : copilotSessions;
+  if(!items.length){ wrap.innerHTML = '<div class="snote">没有匹配「' + esc(query) + '」的会话。</div>'; return; }
+  for(const s of items){
+    const item = document.createElement('div');
+    item.className = 'sitem' + (s.id === sid ? ' active' : '');
+    const title = (s.title && s.title.trim()) ? s.title : '未命名会话';
+    const repo = shortRepo(s);
+    const src = s.source === 'vscode' ? 'VS Code · ' : (s.source === 'cli' ? 'CLI · ' : '');
+    item.innerHTML = '<div class="stitle"><div class="t"></div><div class="sub"></div></div>'
+      + '<button class="imp">导入</button>';
+    item.querySelector('.t').textContent = title;
+    item.querySelector('.sub').textContent = src + (repo ? repo + ' · ' : '') + relTime(s.updatedAt) + ' · ' + (s.messageCount||0) + ' 条';
+    const go = ()=> importCopilot(s.id);
+    item.querySelector('.stitle').onclick = go;
+    item.querySelector('.imp').onclick = (e)=>{ e.stopPropagation(); go(); };
+    wrap.appendChild(item);
+  }
+}
+async function loadCopilotSessions(){
+  slist.innerHTML = '<div class="snote">正在扫描 Copilot 会话…</div>';
+  try{
+    const list = await api('GET','/api/copilot-sessions') || [];
+    renderCopilotSessions(list);
+  }catch(e){
+    slist.innerHTML = '<div class="snote">读取失败：' + esc(e.message) + '</div>';
+  }
+}
+async function importCopilot(id){
+  try{
+    const s = await api('POST','/api/copilot-sessions/' + encodeURIComponent(id) + '/import');
+    sid = s.id; localStorage.setItem('cb_sid', sid);
+    await loadSessions();       // refresh the local list (now includes the imported one)
+    await openSession(sid);     // load + render its full transcript
+  }catch(e){ alert('导入失败：' + e.message); }
+}
+async function openSession(id){
+  try{
+    const s = await api('GET','/api/sessions/' + encodeURIComponent(id));
+    sid = s.id; localStorage.setItem('cb_sid', sid);
+    log.innerHTML = '';
+    if(!s.messages || !s.messages.length){
+      addMsg('bot','新会话已就绪 ✨ 发条指令试试。');
+    } else {
+      for(const m of s.messages){
+        const kind = m.role === 'user' ? 'user' : (m.ok === false ? 'err' : 'bot');
+        const imgs = (m.attachments || []).filter(a => a && a.url).map(a => ({ src: attUrl(a), name: a.name }));
+        addMsg(kind, m.text || '', imgs);
+      }
+    }
+    renderSessions(); closeDrawer();
+  }catch(e){ addMsg('err','打开会话失败：' + e.message); }
+}
+async function newSession(){
+  try{
+    const s = await api('POST','/api/sessions', { title: '' });
+    sid = s.id; localStorage.setItem('cb_sid', sid);
+    await loadSessions();
+    log.innerHTML = ''; addMsg('bot','已开始新会话 ✨'); closeDrawer();
+  }catch(e){ addMsg('err','新建会话失败：' + e.message); }
+}
+async function delSession(id, title){
+  if(!confirm('删除会话「' + title + '」？此操作不可恢复。')) return;
+  try{
+    await api('DELETE','/api/sessions/' + encodeURIComponent(id));
+    if(id === sid){ sid = ''; localStorage.removeItem('cb_sid'); }
+    await loadSessions();
+    if(!sid){ sessions.length ? openSession(sessions[0].id) : newSession(); }
+  }catch(e){ addMsg('err','删除失败：' + e.message); }
+}
+async function ensureSession(){
+  if(sid){
+    try{ await api('GET','/api/sessions/' + encodeURIComponent(sid)); return; }
+    catch(e){ sid = ''; }
+  }
+  await loadSessions();
+  if(sessions.length) sid = sessions[0].id;
+  else { const s = await api('POST','/api/sessions', { title:'' }); sid = s.id; }
+  localStorage.setItem('cb_sid', sid);
+}
+
+/* ---------- drawer ---------- */
+function openDrawer(){ drawer.classList.add('show'); scrim.classList.add('show'); loadSessions(); }
+function closeDrawer(){ drawer.classList.remove('show'); scrim.classList.remove('show'); }
+$('#menuBtn').onclick = openDrawer;
+scrim.onclick = closeDrawer;
+$('#newBtn').onclick = newSession;
+$('#importBtn').onclick = loadCopilotSessions;
+
+/* ---------- send ---------- */
+async function poll(jobId, thinking){
+  for(;;){
+    await sleep(1200);
+    const j = await api('GET','/api/chat/' + jobId);
+    if(thinking && thinking._update) thinking._update(j);
+    if(j.status === 'done') return j;
+  }
+}
+async function send(text){
+  const imgs = pending.slice();
+  addMsg('user', text, imgs.map(p => ({ src: p.dataUrl, name: p.name })));
+  input.value = ''; input.style.height = 'auto';
+  pending = []; renderPending();
+  sendBtn.disabled = true;
+  let thinking;
+  try{
+    await ensureSession();
+    const payload = { message: text, conversationId: sid, reset: false };
+    if(imgs.length) payload.images = imgs.map(p => ({ name: p.name, mime: p.mime, data: p.b64 }));
+    const start = await api('POST','/api/chat', payload);
+    thinking = addThinking(start);
+    const res = await poll(start.jobId, thinking);
+    thinking._stop(); thinking.remove();
+    addMsg(res.ok === false ? 'err' : 'bot', res.reply || '(无输出)');
+    loadSessions();   // refresh titles / ordering / counts
+  }catch(e){
+    if(thinking){ thinking._stop(); thinking.remove(); }
+    if(e.message === 'unauthorized') addMsg('err','未授权：请点右上角 ⚙ 填写正确的 API Token');
+    else addMsg('err','连接失败：' + e.message + '（确认 server 和 devtunnel 都在运行）');
+  }finally{
+    updateSendEnabled();
+  }
+}
+form.addEventListener('submit', e=>{ e.preventDefault(); const t=input.value.trim(); if(t || pending.length) send(t); });
+input.addEventListener('keydown', e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); form.requestSubmit(); } });
+input.addEventListener('input', ()=>{ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,140)+'px'; updateSendEnabled(); });
+
+/* ---------- attach images (button, file picker, paste) ---------- */
+attachBtn.onclick = ()=> fileInput.click();
+fileInput.onchange = ()=>{ addFiles([...fileInput.files]); fileInput.value=''; };
+input.addEventListener('paste', e=>{
+  const items = (e.clipboardData && e.clipboardData.items) || [];
+  const files = [];
+  for(const it of items){ if(it.kind === 'file' && it.type && it.type.startsWith('image/')){ const f = it.getAsFile(); if(f) files.push(f); } }
+  if(files.length){ e.preventDefault(); addFiles(files); }
+});
+updateSendEnabled();
+
+/* ---------- settings ---------- */
+const modal = $('#modal');
+function openModal(){ $('#baseInput').value = base; $('#tokenInput').value = token; modal.classList.add('show'); }
+$('#setBtn').onclick = openModal;
+$('#cancelBtn').onclick = ()=> modal.classList.remove('show');
+$('#saveBtn').onclick = async ()=>{
+  base = ($('#baseInput').value.trim() || location.origin).replace(/\/$/,'');
+  token = $('#tokenInput').value.trim();
+  localStorage.setItem('cb_base', base); localStorage.setItem('cb_token', token);
+  modal.classList.remove('show');
+  await boot(true);
+};
+
+/* ---------- boot ---------- */
+async function boot(quiet){
+  try{
+    const cfg = await api('GET','/api/webconfig');
+    if(cfg.authRequired && !token){
+      addMsg('bot','⚠️ 这个服务需要 API Token，请点右上角 ⚙ 填写。'); openModal(); return;
+    }
+  }catch(e){ if(!quiet) addMsg('err','连不上服务器：' + e.message); return; }
+  await loadSessions();
+  if(sessions.length) await openSession(sessions.some(s=>s.id===sid) ? sid : sessions[0].id);
+  else await newSession();
+}
+boot(false);
+
+if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
+</script>
+</body>
+</html>

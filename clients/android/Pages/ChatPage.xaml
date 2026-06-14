@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:models="clr-namespace:CopilotBridgeAndroid.Models"
+             xmlns:md="clr-namespace:CopilotBridgeAndroid.Markdown"
+             x:Class="CopilotBridgeAndroid.Pages.ChatPage"
+             Title="Copilot Bridge"
+             BackgroundColor="#F3F3F4">
+
+    <Grid RowDefinitions="*,Auto">
+
+        <CollectionView Grid.Row="0" x:Name="MessagesView" Margin="0,6">
+            <CollectionView.ItemTemplate>
+                <DataTemplate x:DataType="models:ChatMessage">
+                    <Grid Padding="10,5">
+                        <Border HorizontalOptions="{Binding BubbleAlignment}"
+                                BackgroundColor="{Binding BubbleColor}"
+                                Stroke="#E2E2E2" StrokeThickness="1"
+                                StrokeShape="RoundRectangle 14"
+                                Padding="12,9" MaximumWidthRequest="320">
+                            <VerticalStackLayout Spacing="4">
+                                <Label Text="{Binding Header}" FontSize="11"
+                                       TextColor="{Binding HeaderColor}" />
+
+                                <!-- image attachments (empty => nothing rendered) -->
+                                <VerticalStackLayout BindableLayout.ItemsSource="{Binding Images}" Spacing="6">
+                                    <BindableLayout.ItemTemplate>
+                                        <DataTemplate x:DataType="models:ChatImage">
+                                            <Image Source="{Binding Source}" Aspect="AspectFit"
+                                                   MaximumHeightRequest="220" HorizontalOptions="Start" />
+                                        </DataTemplate>
+                                    </BindableLayout.ItemTemplate>
+                                </VerticalStackLayout>
+
+                                <!-- Busy state: live "正在思考… Ns" -->
+                                <HorizontalStackLayout Spacing="8" IsVisible="{Binding IsBusy}">
+                                    <ActivityIndicator IsRunning="{Binding IsBusy}"
+                                                       Color="{Binding TextColor}"
+                                                       WidthRequest="16" HeightRequest="16"
+                                                       VerticalOptions="Center" />
+                                    <Label Text="{Binding BusyText}" FontSize="14"
+                                           TextColor="{Binding TextColor}" VerticalOptions="Center" />
+                                </HorizontalStackLayout>
+
+                                <!-- Reply / message text. User & system bubbles stay plain
+                                     (their text is user input / status); assistant replies
+                                     are rendered as Markdown. -->
+                                <Label Text="{Binding Text}" FontSize="15"
+                                       TextColor="{Binding TextColor}"
+                                       IsVisible="{Binding IsPlainVisible}" />
+                                <md:MarkdownView MarkdownText="{Binding Text}"
+                                                 TextColor="{Binding TextColor}"
+                                                 IsVisible="{Binding IsAssistantVisible}" />
+                            </VerticalStackLayout>
+                        </Border>
+                    </Grid>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+        </CollectionView>
+
+        <Border Grid.Row="1" BackgroundColor="White" StrokeThickness="0" Padding="10,8">
+            <VerticalStackLayout Spacing="8">
+                <!-- pending image previews (hidden until an image is picked) -->
+                <ScrollView Orientation="Horizontal" x:Name="PendingScroll" IsVisible="False">
+                    <HorizontalStackLayout x:Name="PendingStrip" Spacing="8">
+                        <BindableLayout.ItemTemplate>
+                            <DataTemplate x:DataType="models:ChatImage">
+                                <Grid WidthRequest="64" HeightRequest="64">
+                                    <Border StrokeThickness="0" StrokeShape="RoundRectangle 8">
+                                        <Image Source="{Binding Source}" Aspect="AspectFill"
+                                               WidthRequest="64" HeightRequest="64" />
+                                    </Border>
+                                    <Button Text="✕" FontSize="10" Padding="0"
+                                            WidthRequest="22" HeightRequest="22" CornerRadius="11"
+                                            BackgroundColor="#99000000" TextColor="White"
+                                            HorizontalOptions="End" VerticalOptions="Start"
+                                            Clicked="OnRemovePending" />
+                                </Grid>
+                            </DataTemplate>
+                        </BindableLayout.ItemTemplate>
+                    </HorizontalStackLayout>
+                </ScrollView>
+                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                    <Button Grid.Column="0" x:Name="AttachBtn" Text="📎"
+                            Clicked="OnAttachClicked" VerticalOptions="Center" />
+                    <Entry Grid.Column="1" x:Name="InputEntry"
+                           Placeholder="输入消息…"
+                           ReturnType="Send"
+                           Completed="OnSendClicked"
+                           VerticalOptions="Center" />
+                    <Button Grid.Column="2" x:Name="SendBtn" Text="发送" Clicked="OnSendClicked" />
+                </Grid>
+            </VerticalStackLayout>
+        </Border>
+
+    </Grid>
+
+</ContentPage>

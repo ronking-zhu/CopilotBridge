@@ -1,0 +1,46 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "version": "1.0.0",
+  "id": "__BOT_APP_ID__",
+  "developer": {
+    "name": "Copilot CLI Bridge",
+    "websiteUrl": "https://github.com/features/copilot",
+    "privacyUrl": "https://github.com/features/copilot",
+    "termsOfUseUrl": "https://github.com/features/copilot"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "Copilot CLI Bridge",
+    "full": "GitHub Copilot CLI Bridge"
+  },
+  "description": {
+    "short": "Run GitHub Copilot CLI on your host machine from Teams.",
+    "full": "Bridges Teams messages to the GitHub Copilot CLI running on your own machine and returns the results. For personal/dev use only."
+  },
+  "accentColor": "#24292F",
+  "bots": [
+    {
+      "botId": "__BOT_APP_ID__",
+      "scopes": ["personal", "team", "groupChat"],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": ["personal", "team", "groupChat"],
+          "commands": [
+            { "title": "/help", "description": "Show help" },
+            { "title": "/whoami", "description": "Show your identity for the allowlist" },
+            { "title": "/reset", "description": "Start a fresh Copilot session" },
+            { "title": "/status", "description": "Show bridge configuration" }
+          ]
+        }
+      ]
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": ["*.devtunnels.ms", "token.botframework.com"]
+}

@@ -1,0 +1,58 @@
+# ===== Secrets & local state =====
+# .env at any depth (the real one lives in server/.env and holds credentials)
+.env
+**/.env
+!**/.env.example
+*.log
+# Per-host connection card (public URL + generated API key) written at startup.
+connection.json
+**/connection.json
+# First-run setup wizard completion marker.
+.setup-done
+**/.setup-done
+
+# Apple code-signing assets must never be committed (they are local inputs to
+# scripts/ios-prepare-secrets.ps1, which stores them as GitHub secrets instead).
+*.p12
+*.p8
+*.mobileprovision
+*.cer
+*.certSigningRequest
+
+# ===== Python (app server) =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ===== GitHub Copilot sandbox + session artifacts =====
+workspace/
+**/workspace/
+copilot-session-*.md
+
+# Persistent server-owned chat sessions (one json per conversation)
+server/sessions/
+
+# ===== Bundled tooling (devtunnel binary downloaded by scripts/install.ps1) =====
+tools/
+
+# ===== .NET / WPF clients =====
+[Bb]in/
+[Oo]bj/
+publish/
+.vs/
+*.user
+*.suo
+
+# ===== Build / distribution artifacts =====
+*.zip
+dist/
+build/
+server/teams/build/
+
+# ===== Local diagnostic output from scripts =====
+scripts/*.txt
+
+# ===== OS cruft =====
+Thumbs.db
+.DS_Store

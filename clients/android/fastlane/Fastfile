@@ -1,0 +1,26 @@
+# Fastlane configuration for uploading the iOS client to TestFlight.
+# The .ipa is produced by `dotnet publish` in the GitHub Actions workflow
+# (.github/workflows/ios-testflight.yml); this lane only uploads it using an
+# App Store Connect API key (no Apple ID / password / 2FA needed).
+
+default_platform(:ios)
+
+platform :ios do
+  desc "Upload an already-built .ipa to TestFlight via App Store Connect API key"
+  lane :beta do
+    api_key = app_store_connect_api_key(
+      key_id: ENV.fetch("ASC_KEY_ID"),
+      issuer_id: ENV.fetch("ASC_ISSUER_ID"),
+      key_filepath: ENV.fetch("ASC_KEY_PATH"),
+      in_house: false
+    )
+
+    upload_to_testflight(
+      api_key: api_key,
+      ipa: ENV.fetch("IPA_PATH"),
+      skip_submission: true,                    # don't submit for App Store review
+      skip_waiting_for_build_processing: true,  # return as soon as the upload lands
+      changelog: (ENV["CHANGELOG"].to_s.empty? ? "CI build" : ENV["CHANGELOG"])
+    )
+  end
+end

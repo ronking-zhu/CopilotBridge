@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="CopilotBridgeAndroid.Pages.SettingsPage"
+             Title="连接设置">
+
+    <ScrollView>
+        <VerticalStackLayout Padding="20" Spacing="14">
+
+            <Label Text="服务器地址" FontAttributes="Bold" />
+            <Entry x:Name="ServerEntry"
+                   Placeholder="http://10.0.2.2:3978"
+                   Keyboard="Url"
+                   ClearButtonVisibility="WhileEditing" />
+
+            <Label Text="API Key（X-API-Key，可留空）" FontAttributes="Bold" Margin="0,6,0,0" />
+            <Entry x:Name="KeyEntry" IsPassword="True" Placeholder="留空表示无需鉴权" />
+
+            <Button x:Name="CheckBtn" Text="检测连接 / Check" Clicked="OnCheckClicked" Margin="0,8,0,0" />
+
+            <HorizontalStackLayout Spacing="8" Margin="0,4,0,0">
+                <BoxView x:Name="StatusDot" WidthRequest="10" HeightRequest="10"
+                         CornerRadius="5" Color="#B0B0B0" VerticalOptions="Center" />
+                <Label x:Name="StatusLabel" Text="未检测" VerticalOptions="Center" TextColor="#666666" />
+            </HorizontalStackLayout>
+
+            <Label Margin="0,12,0,0" FontSize="12" TextColor="#888888"
+                   Text="提示：在模拟器中用 http://10.0.2.2:3978 访问宿主机上运行的本地服务器；在真机上请改用 Dev Tunnel 的 https 地址。设置会自动保存。" />
+
+        </VerticalStackLayout>
+    </ScrollView>
+
+</ContentPage>

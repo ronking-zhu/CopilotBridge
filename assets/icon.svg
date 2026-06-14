@@ -1,0 +1,61 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Copilot Bridge">
+  <defs>
+    <!-- App background: modern sky-blue -> indigo diagonal gradient -->
+    <linearGradient id="bg" x1="64" y1="40" x2="448" y2="472" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2DB8F5"/>
+      <stop offset="0.52" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#6D4AE6"/>
+    </linearGradient>
+    <!-- Soft top sheen for depth -->
+    <radialGradient id="sheen" cx="0.32" cy="0.16" r="0.9">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.30"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Glow halo behind the simplified Copilot spark -->
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.7"/>
+      <stop offset="0.55" stop-color="#EAF6FF" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Microsoft 4-colour palette, used for the AI nodes on the bridge cable:
+         red #F25022 · green #7FBA00 · blue #00A4EF · yellow #FFB900 -->
+    <clipPath id="round">
+      <rect x="16" y="16" width="480" height="480" rx="112" ry="112"/>
+    </clipPath>
+  </defs>
+
+  <!-- Rounded-square app tile -->
+  <rect x="16" y="16" width="480" height="480" rx="112" ry="112" fill="url(#bg)"/>
+  <rect x="16" y="16" width="480" height="480" rx="112" ry="112" fill="url(#sheen)"/>
+
+  <g clip-path="url(#round)">
+    <!-- Ultra-minimal suspension bridge: deck + 2 towers + 1 cable -->
+    <!-- Deck -->
+    <rect x="108" y="360" width="296" height="12" rx="6" fill="#FFFFFF"/>
+    <!-- Towers -->
+    <g fill="#FFFFFF">
+      <rect x="172" y="212" width="12" height="156" rx="4"/>
+      <rect x="328" y="212" width="12" height="156" rx="4"/>
+    </g>
+    <!-- Main cable: back-stays + one clean catenary -->
+    <path d="M116 366 L178 212 Q256 330 334 212 L396 366"
+          fill="none" stroke="#FFFFFF" stroke-width="8"
+          stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Copilot constellation: one big white spark + 4 small Microsoft-colour stars -->
+    <circle cx="256" cy="158" r="104" fill="url(#glow)"/>
+    <!-- Big hero spark -->
+    <path d="M256 96 Q256 158 318 158 Q256 158 256 220 Q256 158 194 158 Q256 158 256 96 Z" fill="#FFFFFF"/>
+    <!-- 4 small satellite sparks in the Microsoft palette (MS-logo arrangement), tucked toward the big star and clear of the bridge -->
+    <path d="M216 120 Q216 134 230 134 Q216 134 216 148 Q216 134 202 134 Q216 134 216 120 Z" fill="#F25022"/>
+    <path d="M296 120 Q296 134 310 134 Q296 134 296 148 Q296 134 282 134 Q296 134 296 120 Z" fill="#7FBA00"/>
+    <path d="M216 168 Q216 182 230 182 Q216 182 216 196 Q216 182 202 182 Q216 182 216 168 Z" fill="#00A4EF"/>
+    <path d="M296 168 Q296 182 310 182 Q296 182 296 196 Q296 182 282 182 Q296 182 296 168 Z" fill="#FFB900"/>
+  </g>
+</svg>
+
+
+
+
+
