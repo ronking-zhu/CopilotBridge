@@ -44,6 +44,17 @@ so multiple devices don't collide.
 
 ---
 
+## Prerequisites (host PC)
+
+- **An AI CLI**, installed and signed in — e.g. **GitHub Copilot CLI**
+  (`copilot --version`), Claude CLI, or an OpenAI key. This is the subscription
+  you're sharing.
+- **Windows** for the one-click installer. (From source also needs **Python
+  3.12+**; the Windows client needs the **.NET 9 SDK**.)
+- **Dev Tunnels** — bundled with the installer; just sign in once.
+
+---
+
 ## Install (Windows, one click)
 
 > You need this on the **host PC** — the computer that has your AI CLI
@@ -145,15 +156,6 @@ Build the installer from source: `.\scripts\build-installer.ps1 -Version x.y.z`
 `/api/chat*` and `/api/sessions*` require `X-API-Key: <token>` (or
 `Authorization: Bearer`). Non-browser clients should also send
 `X-Tunnel-Skip-AntiPhishing-Page: true`.
-
-## Prerequisites (host PC)
-
-- **An AI CLI**, installed and signed in — e.g. **GitHub Copilot CLI**
-  (`copilot --version`), Claude CLI, or an OpenAI key. This is the subscription
-  you're sharing.
-- **Windows** for the one-click installer. (From source also needs **Python
-  3.12+**; the Windows client needs the **.NET 9 SDK**.)
-- **Dev Tunnels** — bundled with the installer; just sign in once.
 
 ## License
 
