@@ -56,6 +56,70 @@ def _title_from_attachments(attachments) -> str:
     return f"\U0001f5bc {len(attachments)} images"
 
 
+def _norm_text(text: str) -> str:
+    """Whitespace-collapsed text used to tell whether two turns are the same."""
+    return " ".join((text or "").split())
+
+
+def _normalize_native_ts(native_msgs: list) -> list:
+    """Return native messages with monotonic non-decreasing timestamps.
+
+    events.jsonl timestamps can be missing or out of order; carrying the last
+    known value forward keeps the two-pointer merge ordering sane.
+    """
+    out: list = []
+    last = 0.0
+    for m in native_msgs or []:
+        ts = m.get("ts")
+        if not isinstance(ts, (int, float)) or ts < last:
+            ts = last
+        else:
+            last = ts
+        out.append({"role": m.get("role") or "user", "text": m.get("text") or "", "ts": ts})
+    return out
+
+
+def merge_message_lists(bridge_msgs: list, native_msgs: list) -> tuple[list, bool]:
+    """Merge a Copilot CLI native transcript into the bridge transcript.
+
+    Both lists are chronological. A two-pointer merge keeps every turn exactly
+    once: when the heads are the *same* turn (same role + whitespace-collapsed
+    text) the bridge copy is kept (it carries attachments / ok / exitCode); a turn
+    that exists in only one side is emitted in timestamp order. Nothing is ever
+    dropped, so a divergence between the two stores becomes a clean union.
+
+    Returns ``(merged, changed)`` where ``changed`` is False when the merge equals
+    the current bridge transcript (so the caller can skip a needless write).
+    """
+    bridge = list(bridge_msgs or [])
+    native = _normalize_native_ts(native_msgs)
+
+    def same(a: dict, b: dict) -> bool:
+        return a.get("role") == b.get("role") and _norm_text(a.get("text")) == _norm_text(b.get("text"))
+
+    def ts(m: dict) -> float:
+        v = m.get("ts")
+        return v if isinstance(v, (int, float)) else 0.0
+
+    merged: list = []
+    i = j = 0
+    while i < len(bridge) and j < len(native):
+        if same(bridge[i], native[j]):
+            merged.append(bridge[i]); i += 1; j += 1
+        elif ts(bridge[i]) <= ts(native[j]):
+            merged.append(bridge[i]); i += 1
+        else:
+            merged.append(native[j]); j += 1
+    merged.extend(bridge[i:])
+    merged.extend(native[j:])
+
+    def seq(lst: list) -> list:
+        return [(m.get("role"), _norm_text(m.get("text"))) for m in lst]
+
+    return merged, seq(merged) != seq(bridge)
+
+
+
 class SessionStore:
     """Thread-safe, disk-backed store of conversation sessions."""
 
@@ -218,6 +282,44 @@ class SessionStore:
             session["updatedAt"] = ts
             if not session.get("title") and role == "user":
                 session["title"] = _title_from_text(text) or _title_from_attachments(attachments)
+            self._persist(session)
+            return session
+
+    def replace_messages(self, session_id: str, messages: list, title: str = "",
+                         updated_at: float | None = None) -> dict:
+        """Atomically replace a session's whole transcript (creating it if missing).
+
+        Used by session sync/merge: recomputes ``messageCount``, bumps
+        ``updatedAt`` to the latest of the existing value / newest message ts /
+        ``updated_at``, and fills the title from ``title`` or the first user
+        message when the session still has none. Per-message enrichments
+        (``attachments``, ``ok``, ``exitCode``) are preserved verbatim.
+        """
+        with self._lock:
+            session = self._index.get(self._norm_id(session_id))
+            if session is None:
+                session = self.create(session_id=session_id)
+            cleaned: list = []
+            for m in messages or []:
+                role = m.get("role") or "user"
+                item = {"role": role, "text": m.get("text") or "", "ts": m.get("ts") or _now()}
+                for key in ("ok", "exitCode", "attachments"):
+                    if m.get(key) is not None:
+                        item[key] = m[key]
+                cleaned.append(item)
+            session["messages"] = cleaned
+            session["messageCount"] = len(cleaned)
+            latest = max([m["ts"] for m in cleaned]
+                         + [session.get("updatedAt") or 0, updated_at or 0])
+            session["updatedAt"] = latest or _now()
+            if not session.get("title"):
+                if title:
+                    session["title"] = _title_from_text(title)
+                else:
+                    for m in cleaned:
+                        if m["role"] == "user" and m["text"]:
+                            session["title"] = _title_from_text(m["text"])
+                            break
             self._persist(session)
             return session
 

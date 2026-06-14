@@ -491,7 +491,12 @@ async function importCopilot(id){
 }
 async function openSession(id){
   try{
-    const s = await api('GET','/api/sessions/' + encodeURIComponent(id));
+    // Re-sync from the server on (re)select: this merges any turns made by
+    // talking to Copilot directly on the host into the server store, so the
+    // web client always shows the complete, reconciled transcript.
+    let s;
+    try{ s = await api('POST','/api/sessions/' + encodeURIComponent(id) + '/sync'); }
+    catch(_){ s = await api('GET','/api/sessions/' + encodeURIComponent(id)); }
     sid = s.id; localStorage.setItem('cb_sid', sid);
     log.innerHTML = '';
     if(!s.messages || !s.messages.length){

@@ -10,6 +10,8 @@ Designed to be reached directly from a phone through a Dev Tunnel:
     POST   /api/sessions  {title?}                           -> 201 session summary
     GET    /api/sessions                                     -> [session summaries]
     GET    /api/sessions/{id}                                -> full session (with messages)
+    POST   /api/sessions/{id}/sync                           -> reconcile with the Copilot CLI's
+                                                                 own transcript, then full session
     DELETE /api/sessions/{id}                                -> {deleted: true}
     PATCH  /api/sessions/{id} {title}                        -> session summary
     GET  /api/copilot-sessions                               -> [Copilot CLI native session summaries]
@@ -41,7 +43,7 @@ from aiohttp import web
 
 import copilot_sessions
 from paths import app_base_dir, resource_dir
-from session_store import SessionStore
+from session_store import SessionStore, merge_message_lists
 
 WEBAPP_DIR = str(resource_dir() / "webapp")
 
@@ -377,6 +379,51 @@ def setup_web_routes(app: web.Application, config, runner):
             return web.json_response({"error": "not found"}, status=404)
         return web.json_response(session)
 
+    async def sessions_sync(request: web.Request) -> web.Response:
+        """Reconcile a session with the Copilot CLI's own on-disk transcript, then
+        return the full merged session.
+
+        Talking to ``copilot`` directly on the host records turns under
+        ``~/.copilot/session-state/<id>/`` that never went through the bridge, so
+        the web/mobile clients would otherwise miss them. A client calls this when
+        it (re)opens a session: we pull the CLI's native transcript (bridge id ==
+        Copilot ``--session-id``), merge any new/divergent turns INTO the
+        server-owned store, persist, and hand back the reconciled session. The
+        merge is a lossless union, so the server stays the single source of truth.
+        """
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        cid = request.match_info["id"]
+        try:
+            native = copilot_sessions.read_session(cid)
+        except ValueError:
+            return web.json_response({"error": "invalid id"}, status=400)
+
+        bridge = store.get(cid)
+        if bridge is None and native is None:
+            return web.json_response({"error": "not found"}, status=404)
+        if native is None:
+            # No native transcript to reconcile against; return the store as-is.
+            return web.json_response(bridge)
+
+        native_msgs = native.get("messages", [])
+        if bridge is None:
+            # First contact: adopt the CLI conversation under the same id.
+            try:
+                session = store.replace_messages(
+                    cid, native_msgs, title=native.get("title", ""),
+                    updated_at=native.get("updatedAt"))
+            except ValueError:
+                return web.json_response({"error": "invalid id"}, status=400)
+            return web.json_response(session)
+
+        merged, changed = merge_message_lists(bridge.get("messages", []), native_msgs)
+        if not changed:
+            return web.json_response(bridge)
+        session = store.replace_messages(
+            cid, merged, title=native.get("title", ""), updated_at=native.get("updatedAt"))
+        return web.json_response(session)
+
     async def sessions_delete(request: web.Request) -> web.Response:
         if not _authorized(request, config.CHAT_API_TOKEN):
             return web.json_response({"error": "unauthorized"}, status=401)
@@ -482,6 +529,7 @@ def setup_web_routes(app: web.Application, config, runner):
     app.router.add_post("/api/sessions", sessions_create)
     app.router.add_get("/api/sessions", sessions_list)
     app.router.add_get("/api/sessions/{id}", sessions_get)
+    app.router.add_post("/api/sessions/{id}/sync", sessions_sync)
     app.router.add_delete("/api/sessions/{id}", sessions_delete)
     app.router.add_patch("/api/sessions/{id}", sessions_rename)
 

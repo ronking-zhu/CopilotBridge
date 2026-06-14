@@ -15,14 +15,14 @@
     the Dev Tunnel sign-in dialog) right after install.
 
 .PARAMETER Version
-    Product version embedded in the installer + output filename (default 1.4.1).
+    Product version embedded in the installer + output filename (default 1.4.2).
 
 .EXAMPLE
     .\scripts\build-installer.ps1
     .\scripts\build-installer.ps1 -Version 1.2.0 -SkipBuild
 #>
 param(
-    [string]$Version = "1.4.1",
+    [string]$Version = "1.4.2",
     [switch]$SkipBuild
 )
 
