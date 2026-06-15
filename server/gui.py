@@ -671,9 +671,31 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
         time.sleep(1.0)
         return act_start_server()
 
+    def _tunnel_reason_msg(reason, detail):
+        detail = (detail or "").strip()
+        if len(detail) > 240:
+            detail = detail[:240].rstrip() + "\u2026"
+        if reason == "not-signed-in":
+            return ("Dev Tunnel isn't signed in on this PC. Open Start menu \u2192 "
+                    "Copilot Bridge and run the setup wizard to sign in (free), "
+                    "then try again.")
+        if reason == "cli-missing":
+            return ("Dev Tunnel isn't installed. Reinstall Copilot Bridge, or install "
+                    "the Dev Tunnel CLI, then try again.")
+        if reason == "tunnel-unavailable":
+            return "Dev Tunnel isn't available on this server."
+        if reason == "host-failed":
+            base = ("Dev Tunnel couldn't connect. This is usually a network or "
+                    "firewall block \u2014 allow access to *.devtunnels.ms (and any "
+                    "corporate proxy).")
+            return base + ("\n\n" + detail if detail else "")
+        return "Dev Tunnel couldn't start." + ("\n\n" + detail if detail else "")
+
     def tunnel_action(action, label):
         try:
-            http("POST", "/api/control/tunnel", body={"action": action}, timeout=150)
+            r = http("POST", "/api/control/tunnel", body={"action": action}, timeout=180)
+            if isinstance(r, dict) and r.get("ok") is False:
+                return False, _tunnel_reason_msg(r.get("reason"), r.get("detail"))
             return True, f"Dev Tunnel {label}."
         except Exception as exc:  # noqa: BLE001
             return False, f"Dev Tunnel {label} failed: {exc}"

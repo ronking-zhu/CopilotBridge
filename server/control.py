@@ -97,28 +97,49 @@ class Controller:
             "provider": self.provider,
         }
 
-    async def pause(self) -> None:
+    async def pause(self) -> dict:
         async with self._lock:
             set_tunnel_paused(True)
             if self.tunnel:
                 await self.tunnel.stop()
             self.public_url = None
             self._save_card()
+            return {"ok": True, **self.status()}
 
-    async def resume(self) -> None:
+    async def resume(self) -> dict:
         async with self._lock:
             set_tunnel_paused(False)
-            if self.tunnel and not self.tunnel.is_hosting():
-                self.public_url = await self.tunnel.host()
-                self._save_card()
+            return await self._ensure_hosting()
 
-    async def restart(self) -> None:
+    async def restart(self) -> dict:
         async with self._lock:
             set_tunnel_paused(False)
             if self.tunnel:
                 await self.tunnel.stop()
-                self.public_url = await self.tunnel.host()
-                self._save_card()
+            return await self._ensure_hosting()
+
+    async def _ensure_hosting(self) -> dict:
+        """Bring the tunnel up (if not already) and report a clear outcome.
+
+        Returns ``{ok, reason, detail, ...status}``. ``reason`` is a short code the
+        Control Panel turns into a friendly message: ``cli-missing`` /
+        ``not-signed-in`` (from :meth:`DevTunnel.diagnose`) or ``host-failed`` with
+        the CLI's own last output in ``detail`` (so a network/proxy block is
+        visible), instead of silently claiming success.
+        """
+        if not self.tunnel:
+            return {"ok": False, "reason": "tunnel-unavailable", **self.status()}
+        ready, reason = self.tunnel.diagnose()
+        if not ready:
+            return {"ok": False, "reason": reason, **self.status()}
+        if not self.tunnel.is_hosting():
+            self.public_url = await self.tunnel.host()
+            self._save_card()
+        if self.tunnel.is_hosting() and self.public_url:
+            return {"ok": True, "reason": "", **self.status()}
+        return {"ok": False, "reason": "host-failed",
+                "detail": getattr(self.tunnel, "last_error", "") or "",
+                **self.status()}
 
     async def watchdog(self, stop_event: asyncio.Event, interval: float = 5.0) -> None:
         """Keep the tunnel in its desired state and self-heal an unexpected drop.
@@ -141,6 +162,11 @@ class Controller:
                         self.public_url = None
                         self._save_card()
                     elif (not paused) and (not hosting):
+                        # Only auto-retry when hosting can actually succeed; e.g.
+                        # don't spin every tick when the user isn't signed in.
+                        ready, _reason = self.tunnel.diagnose()
+                        if not ready:
+                            continue
                         logger.info("Dev Tunnel not running — re-hosting (watchdog).")
                         url = await self.tunnel.host(url_timeout=30.0, retries=1)
                         if url:
@@ -213,14 +239,14 @@ def setup_control_routes(app: web.Application, config) -> None:
             data = {}
         action = str(data.get("action", "")).strip().lower()
         if action == "pause":
-            await ctl.pause()
+            result = await ctl.pause()
         elif action == "resume":
-            await ctl.resume()
+            result = await ctl.resume()
         elif action == "restart":
-            await ctl.restart()
+            result = await ctl.restart()
         else:
             return json_response({"error": "bad-action"}, status=400)
-        return json_response(ctl.status())
+        return json_response(result)
 
     app.router.add_get("/api/control/status", status)
     app.router.add_post("/api/control/shutdown", shutdown)

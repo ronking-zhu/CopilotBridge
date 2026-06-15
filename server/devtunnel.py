@@ -82,6 +82,9 @@ class DevTunnel:
         self.anonymous = anonymous
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._drain_task: Optional[asyncio.Task] = None
+        # Last few lines the devtunnel CLI printed on a failed host attempt, kept so
+        # the Control Panel / logs can show the *real* reason it wouldn't start.
+        self.last_error: str = ""
 
     # -- sync helpers (quick CLI calls) ----------------------------------
 
@@ -103,6 +106,23 @@ class DevTunnel:
             return False
         out = (result.stdout or "") + (result.stderr or "")
         return "Logged in" in out
+
+    def diagnose(self) -> tuple[bool, str]:
+        """Return ``(ready, reason)`` describing whether hosting can succeed.
+
+        ``reason`` is a short machine code the UI maps to a friendly message:
+        ``"cli-missing"`` (devtunnel.exe not found), ``"not-signed-in"`` (needs
+        ``devtunnel user login``), or ``""`` when everything looks ready. This is
+        the first thing the Control Panel checks so a failure is explained rather
+        than silently retried.
+        """
+        exe = self.exe
+        found = bool(exe) and (os.path.isfile(exe) or shutil.which(exe) is not None)
+        if not found:
+            return False, "cli-missing"
+        if not self.is_logged_in():
+            return False, "not-signed-in"
+        return True, ""
 
     def login(self, timeout: int = 300) -> bool:
         """Run ``devtunnel user login`` (browser auth) and return success.
@@ -212,8 +232,9 @@ class DevTunnel:
                 logger.warning("devtunnel host attempt %d/%d got no public URL; "
                                "retrying in %.0fs", attempt, retries, wait)
                 await asyncio.sleep(wait)
-        logger.error("devtunnel failed to host '%s' after %d attempts; LAN-only.",
-                     self.tunnel_id, retries)
+        logger.error("devtunnel failed to host '%s' after %d attempts; LAN-only.%s",
+                     self.tunnel_id, retries,
+                     (" Last output: " + self.last_error) if self.last_error else "")
         return None
 
     async def _host_once(self, url_timeout: float = 45.0) -> Optional[str]:
@@ -225,6 +246,7 @@ class DevTunnel:
         )
 
         public_url: Optional[str] = None
+        captured: list[str] = []
         loop = asyncio.get_running_loop()
         deadline = loop.time() + url_timeout
 
@@ -239,6 +261,7 @@ class DevTunnel:
             line = raw.decode("utf-8", "replace").rstrip()
             if line:
                 logger.debug("devtunnel: %s", line)
+                captured.append(line)
             # The URL usually rides the "Connect via browser" line, but scan every
             # line so a CLI output-format change never leaves us URL-less.
             if not public_url:
@@ -248,9 +271,13 @@ class DevTunnel:
             if "Ready to accept connections" in line:
                 break
 
-        # Only keep + background-drain the process if it's actually up with a URL.
         if public_url and self._proc.returncode is None:
+            # Up: keep + background-drain the process; clear any prior error.
             self._drain_task = asyncio.create_task(self._drain())
+            self.last_error = ""
+        else:
+            # Failed: remember what the CLI actually said so the UI can show it.
+            self.last_error = "\n".join(captured[-8:]).strip()
         return public_url
 
     async def _drain(self) -> None:

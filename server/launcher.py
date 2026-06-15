@@ -172,13 +172,25 @@ async def run(info_q=None) -> None:
         log.warning("[startup 5/%d] /health did not return 200 in time; continuing.",
                     _TOTAL_STAGES)
 
-    # ---- Stage 6: host the Dev Tunnel ---------------------------------
-    from control import tunnel_paused
+    # ---- Control plane: attach BEFORE the (slow) Dev Tunnel hosting ----
+    # The Control Panel talks to the server over HTTP. Stage 6 hosting can take
+    # several seconds with retries, so wire the stop event + an (empty) controller
+    # now — otherwise control calls during startup would 409. Stage 6 fills in the
+    # tunnel handle once it has one.
+    from control import Controller, tunnel_paused
 
+    stop = asyncio.Event()
+    APP["cb_stop"] = stop
+    controller = Controller(None, CONFIG, write_connection_card, api_key,
+                            getattr(RUNNER, "name", "copilot"), None, host, port)
+    APP["cb_controller"] = controller
+
+    # ---- Stage 6: host the Dev Tunnel ---------------------------------
     tunnel: DevTunnel | None = None
     public_url: str | None = None
     if CONFIG.TUNNEL_ENABLED and tunnel_exe:
         candidate = DevTunnel(tunnel_exe, CONFIG.TUNNEL_ID, port, CONFIG.TUNNEL_ANONYMOUS)
+        controller.tunnel = candidate  # let the Control Panel act on it immediately
         # In GUI mode the wizard already handled sign-in on the main thread, so we
         # must NOT call tkinter here (we're on a worker thread). In console/headless
         # mode, only a real console prompt would apply; we just honour the current
@@ -186,6 +198,9 @@ async def run(info_q=None) -> None:
         if not candidate.is_logged_in():
             _stage(6, "Dev Tunnel: not signed in. Server is up on the LAN; public "
                       "tunnel skipped. Sign in to Dev Tunnel and restart for a public URL.")
+            # Keep the handle so the Control Panel can explain *why* (not signed in)
+            # and host it once the user signs in — don't silently disable it.
+            tunnel = candidate
         elif tunnel_paused():
             _stage(6, "Dev Tunnel is paused (from the Control Panel). Serving LAN-only; "
                       "resume it from the Control Panel for a public URL.")
@@ -229,18 +244,13 @@ async def run(info_q=None) -> None:
         except Exception as exc:  # noqa: BLE001
             log.debug("posting connection info failed: %s", exc)
 
-    # ---- Control plane: stop event + tunnel controller + watchdog -----
-    # The Control Panel (a separate process) drives these over HTTP:
-    #   POST /api/control/shutdown      -> sets this stop event (graceful stop)
-    #   POST /api/control/tunnel        -> Controller.pause/resume/restart
-    # The watchdog keeps the tunnel in its desired state and self-heals a drop.
-    from control import Controller
-
-    stop = asyncio.Event()
-    APP["cb_stop"] = stop
-    controller = Controller(tunnel, CONFIG, write_connection_card, api_key,
-                            provider, public_url, host, port)
-    APP["cb_controller"] = controller
+    # ---- Control plane: finalize state + start the watchdog -----------
+    # The controller was attached before Stage 6 (so control calls work during
+    # startup); now record the final tunnel handle + public URL and start the
+    # watchdog that keeps the tunnel in its desired state / self-heals a drop.
+    controller.tunnel = tunnel
+    controller.public_url = public_url
+    controller.provider = provider
     watchdog_task = (asyncio.create_task(controller.watchdog(stop))
                      if tunnel is not None else None)
 
