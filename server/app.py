@@ -40,7 +40,7 @@ logger = logging.getLogger("copilot_bridge")
 
 # Product version. Surfaced in /health so clients and the upgrade flow can see
 # which build is running. Keep in step with the installer (-Version) at release.
-__version__ = "1.4.3"
+__version__ = "1.4.4"
 
 CONFIG = DefaultConfig()
 

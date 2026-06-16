@@ -30,12 +30,17 @@ CONNECTION_PATH = app_base_dir() / "connection.json"
 
 def _read_env_token(env_path: Path) -> str:
     """Return the current CHAT_API_TOKEN value from .env, or '' if absent/empty."""
+    return _read_env_value(env_path, "CHAT_API_TOKEN")
+
+
+def _read_env_value(env_path: Path, key: str) -> str:
+    """Return the current ``key`` value from .env, or '' if absent/empty/commented."""
     if not env_path.is_file():
         return ""
     try:
         for line in env_path.read_text(encoding="utf-8").splitlines():
             s = line.strip()
-            if s.startswith("CHAT_API_TOKEN=") and not s.startswith("#"):
+            if s.startswith(f"{key}=") and not s.startswith("#"):
                 return s.split("=", 1)[1].strip()
     except OSError:
         return ""
@@ -93,6 +98,30 @@ def ensure_api_token(env_path: Path | str = DEFAULT_ENV_PATH) -> tuple[str, bool
     _upsert_env_line(env_path, "CHAT_API_TOKEN", token)
     os.environ["CHAT_API_TOKEN"] = token
     return token, True
+
+
+def ensure_tunnel_id(env_path: Path | str = DEFAULT_ENV_PATH) -> tuple[str, bool]:
+    """Return ``(tunnel_id, created)`` — a **host-unique** Dev Tunnel id.
+
+    Dev Tunnel ids are GLOBALLY unique across the whole Dev Tunnels service, so a
+    hardcoded shared id (the old ``copilot-bridge``) collides: only the first
+    account to claim it can host it, and everyone else gets
+    ``Unauthorized tunnel access ... expected [host]``. We therefore mint a
+    per-host id (``copilot-bridge-<random>``) on first run and persist it to
+    ``.env`` (and ``os.environ``), exactly like the API key. An id the user set
+    themselves is respected.
+    """
+    env_path = Path(env_path)
+    existing = _read_env_value(env_path, "TUNNEL_ID")
+    if existing and existing != "copilot-bridge":
+        os.environ.setdefault("TUNNEL_ID", existing)
+        return existing, False
+
+    # Lowercase letters/digits/hyphens only; short random suffix avoids collisions.
+    tunnel_id = "copilot-bridge-" + secrets.token_hex(4)
+    _upsert_env_line(env_path, "TUNNEL_ID", tunnel_id)
+    os.environ["TUNNEL_ID"] = tunnel_id
+    return tunnel_id, True
 
 
 def write_connection_card(

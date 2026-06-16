@@ -105,12 +105,18 @@ async def run(info_q=None) -> None:
     # Generate a host-unique CHAT_API_TOKEN on first run (persisted to .env) so a
     # freshly-installed server "just works" and every machine gets its own key.
     # Must happen BEFORE importing app/config (config reads .env at import time).
-    from provisioning import ensure_api_token, write_connection_card
+    from provisioning import ensure_api_token, ensure_tunnel_id, write_connection_card
 
     api_key, created = ensure_api_token()
     if created:
         log.info("[startup 0/%d] Generated a new host-unique API key (saved to .env).",
                  _TOTAL_STAGES)
+    # Dev Tunnel ids are GLOBALLY unique; a shared id collides across machines
+    # ("Unauthorized tunnel access ... expected [host]"), so give every host its own.
+    tunnel_id, tid_created = ensure_tunnel_id()
+    if tid_created:
+        log.info("[startup 0/%d] Using host-unique Dev Tunnel id '%s' (saved to .env).",
+                 _TOTAL_STAGES, tunnel_id)
 
     # ``info_q`` set => we're driven by the desktop GUI (gui mode): the GUI wizard
     # already handled the Dev Tunnel + AI choices on the main thread, so DON'T run
@@ -303,13 +309,15 @@ def _run_gui() -> None:
     import queue
     import threading
 
-    from provisioning import ensure_api_token, read_connection_card
+    from provisioning import ensure_api_token, ensure_tunnel_id, read_connection_card
 
-    # Ensure the API key exists before we read config for the wizard.
+    # Ensure the API key + host-unique Dev Tunnel id exist before we read config
+    # for the wizard (a shared tunnel id collides across machines).
     try:
         ensure_api_token()
+        ensure_tunnel_id()
     except Exception as exc:  # noqa: BLE001
-        log.warning("ensure_api_token failed: %s", exc)
+        log.warning("provisioning failed: %s", exc)
 
     import config as _config
     importlib.reload(_config)

@@ -685,6 +685,13 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
         if reason == "tunnel-unavailable":
             return "Dev Tunnel isn't available on this server."
         if reason == "host-failed":
+            low = detail.lower()
+            # A globally-unique tunnel id owned by someone else -> can't host it.
+            if "expected" in low and "host" in low and ("unauthorized" in low or "scope" in low):
+                return ("This Dev Tunnel name is already in use by another account, so "
+                        "this PC can't host it. Delete TUNNEL_ID from your .env (or set a "
+                        "unique one) and restart \u2014 Copilot Bridge will pick a fresh, "
+                        "unique tunnel automatically." + ("\n\n" + detail if detail else ""))
             base = ("Dev Tunnel couldn't connect. This is usually a network or "
                     "firewall block \u2014 allow access to *.devtunnels.ms (and any "
                     "corporate proxy).")
