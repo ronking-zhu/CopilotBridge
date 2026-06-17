@@ -94,6 +94,29 @@ class DefaultConfig:
     # EMPTY => no auth (anyone with the tunnel URL can run Copilot - unsafe). Set a strong value.
     CHAT_API_TOKEN = os.environ.get("CHAT_API_TOKEN", "")
 
+    # --- Identity / auth policy for the direct chat + control API ---
+    # 'apikey' (default) keeps the legacy shared CHAT_API_TOKEN. 'entra' requires a
+    # Microsoft Entra ID (Azure AD) signed-in user (no shared key). 'both' accepts
+    # either, for a safe migration. Default 'apikey' => existing installs unchanged.
+    AUTH_MODE = (os.environ.get("AUTH_MODE", "apikey") or "apikey").strip().lower()
+    # Entra ID app registration the clients sign in against + this server validates.
+    # ENTRA_TENANT_ID: your tenant GUID (single-tenant, recommended) or
+    #   'organizations'/'common' for multi-tenant. ENTRA_AUDIENCE: the API's
+    #   Application ID URI (api://<id>) or client id the access token is issued for
+    #   (comma-separated to accept more than one).
+    ENTRA_TENANT_ID = os.environ.get("ENTRA_TENANT_ID", "")
+    ENTRA_CLIENT_ID = os.environ.get("ENTRA_CLIENT_ID", "")
+    ENTRA_AUDIENCE = _as_list(os.environ.get("ENTRA_AUDIENCE", ""))
+    # The scope(s) the client requests for this API (e.g. api://<id>/access_as_user).
+    ENTRA_SCOPES = _as_list(os.environ.get("ENTRA_SCOPES", ""))
+    # WHO is allowed (fail-closed: at least one of these must match, else denied).
+    #   users  = object ids (oid) and/or emails / UPNs (case-insensitive)
+    #   groups = Entra security-group object ids (needs the groups claim configured)
+    #   roles  = app-role values you defined on the app registration (recommended)
+    ENTRA_ALLOWED_USERS = _as_list(os.environ.get("ENTRA_ALLOWED_USERS", ""))
+    ENTRA_ALLOWED_GROUPS = _as_list(os.environ.get("ENTRA_ALLOWED_GROUPS", ""))
+    ENTRA_ALLOWED_ROLES = _as_list(os.environ.get("ENTRA_ALLOWED_ROLES", ""))
+
     # --- Dev Tunnel (public ingress, used by the orchestrated launcher.py) ---
     # When enabled, launcher.py starts a Microsoft Dev Tunnel once the server is
     # healthy, exposing a public HTTPS URL that forwards to the local port.

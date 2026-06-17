@@ -1,6 +1,6 @@
 // Minimal service worker: cache the app shell, never cache API calls.
-const CACHE = 'copilot-bridge-v9';
-const SHELL = ['/', '/index.html', '/icon.svg', '/manifest.webmanifest'];
+const CACHE = 'copilot-bridge-v11';
+const SHELL = ['/', '/index.html', '/icon.svg', '/manifest.webmanifest', '/vendor/msal-browser.min.js'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}));
@@ -17,5 +17,20 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (url.pathname.startsWith('/api/')) return; // always go to network for the API
+
+  // Navigations — including the Microsoft sign-in redirect back to "/#code=..." —
+  // are served straight from the cached app shell. This keeps the browser from
+  // round-tripping to the Dev Tunnel, whose one-time anti-phishing interstitial
+  // would otherwise interrupt the OAuth redirect on phones (=> AADSTS900561). The
+  // auth code rides in the URL fragment, which the browser preserves, so MSAL
+  // still processes it after the cached page loads.
+  if (e.request.mode === 'navigate') {
+    e.respondWith(
+      caches.match('/index.html').then((r) => r || caches.match('/')).then((r) => r || fetch(e.request))
+    );
+    return;
+  }
+
   e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request)));
 });
+

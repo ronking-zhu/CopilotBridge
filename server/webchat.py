@@ -91,6 +91,16 @@ def setup_web_routes(app: web.Application, config, runner):
     # corrupt the conversation), and each waiter can see its position in line.
     queues: dict = {}
 
+    # Request authorization: shared API key and/or Microsoft Entra ID sign-in,
+    # per config.AUTH_MODE (default 'apikey' = unchanged legacy behaviour).
+    from auth import Authenticator
+    authn = Authenticator(config)
+
+    def _authorized(request: web.Request, token=None, allow_query: bool = False) -> bool:
+        # ``token`` is accepted (and ignored) so the many existing call sites that
+        # pass config.CHAT_API_TOKEN stay unchanged; the Authenticator reads config.
+        return authn.check(request, allow_query=allow_query)
+
     sessions_dir = getattr(config, "SESSIONS_DIR", "") or str(app_base_dir() / "sessions")
     store = SessionStore(sessions_dir)
 
@@ -353,7 +363,7 @@ def setup_web_routes(app: web.Application, config, runner):
         })
 
     async def webconfig(request: web.Request) -> web.Response:  # noqa: ARG001
-        return web.json_response({"authRequired": bool(config.CHAT_API_TOKEN)})
+        return web.json_response(authn.describe())
 
     async def sessions_create(request: web.Request) -> web.Response:
         if not _authorized(request, config.CHAT_API_TOKEN):
@@ -545,3 +555,5 @@ def setup_web_routes(app: web.Application, config, runner):
     app.router.add_get("/manifest.webmanifest", _file("manifest.webmanifest"))
     app.router.add_get("/sw.js", _file("sw.js", headers={"Service-Worker-Allowed": "/"}))
     app.router.add_get("/icon.svg", _file("icon.svg"))
+    # Bundled MSAL.js (browser) for the optional Microsoft Entra ID sign-in.
+    app.router.add_get("/vendor/msal-browser.min.js", _file("vendor/msal-browser.min.js"))

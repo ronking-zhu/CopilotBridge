@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
@@ -122,6 +123,168 @@ def ensure_tunnel_id(env_path: Path | str = DEFAULT_ENV_PATH) -> tuple[str, bool
     _upsert_env_line(env_path, "TUNNEL_ID", tunnel_id)
     os.environ["TUNNEL_ID"] = tunnel_id
     return tunnel_id, True
+
+
+_GUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _dsregcmd_status() -> str:
+    """Return raw ``dsregcmd /status`` text (Windows), or '' on any failure."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["dsregcmd", "/status"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout or ""
+
+
+def detect_entra_tenant() -> tuple[str, str]:
+    """Best-effort ``(tenant_id, tenant_name)`` of the Entra ID tenant THIS Windows
+    device is joined/registered to, or ``('', '')`` if it can't be determined.
+
+    Parses ``dsregcmd /status`` for ``TenantId`` (a GUID) and ``TenantName``. Works
+    for Entra-joined, hybrid-joined, and workplace-joined (registered) devices, and
+    never raises -- callers treat an empty result as "not detected".
+    """
+    text = _dsregcmd_status()
+    if not text:
+        return "", ""
+    tenant_id = ""
+    tenant_name = ""
+    for line in text.splitlines():
+        key, sep, val = line.partition(":")
+        if not sep:
+            continue
+        k = key.strip().lower()
+        v = val.strip()
+        if not tenant_id and k == "tenantid" and _GUID_RE.match(v):
+            tenant_id = v
+        elif not tenant_name and k == "tenantname" and v:
+            tenant_name = v
+        if tenant_id and tenant_name:
+            break
+    return tenant_id, tenant_name
+
+
+def ensure_entra_tenant(env_path: Path | str = DEFAULT_ENV_PATH) -> tuple[str, bool]:
+    """Return ``(tenant_id, created)``.
+
+    On first run, pre-fill ``ENTRA_TENANT_ID`` in ``.env`` from the tenant this
+    machine is already joined to, so an admin who later turns on Microsoft sign-in
+    (``AUTH_MODE=entra``) doesn't have to hunt for the GUID. Respects a value the
+    user already set, and **never** changes ``AUTH_MODE`` -- detection only fills the
+    tenant; sign-in stays off until the admin opts in and adds an app registration
+    plus an allowlist. Returns ``('', False)`` when nothing could be detected.
+    """
+    env_path = Path(env_path)
+    existing = _read_env_value(env_path, "ENTRA_TENANT_ID")
+    if existing:
+        os.environ.setdefault("ENTRA_TENANT_ID", existing)
+        return existing, False
+
+    tenant_id, _name = detect_entra_tenant()
+    if not tenant_id:
+        return "", False
+    _upsert_env_line(env_path, "ENTRA_TENANT_ID", tenant_id)
+    os.environ["ENTRA_TENANT_ID"] = tenant_id
+    return tenant_id, True
+
+
+# Maps the keyword args of :func:`set_identity_config` to their ``.env`` keys.
+_IDENTITY_ENV_KEYS = {
+    "auth_mode": "AUTH_MODE",
+    "tenant_id": "ENTRA_TENANT_ID",
+    "client_id": "ENTRA_CLIENT_ID",
+    "audience": "ENTRA_AUDIENCE",
+    "scopes": "ENTRA_SCOPES",
+    "allowed_users": "ENTRA_ALLOWED_USERS",
+    "allowed_groups": "ENTRA_ALLOWED_GROUPS",
+    "allowed_roles": "ENTRA_ALLOWED_ROLES",
+}
+
+
+def set_identity_config(env_path: Path | str = DEFAULT_ENV_PATH, **fields) -> dict:
+    """Upsert identity / Entra settings into ``.env`` (and ``os.environ``).
+
+    Accepts any of ``auth_mode, tenant_id, client_id, audience, scopes,
+    allowed_users, allowed_groups, allowed_roles`` as strings (the list-valued ones
+    are stored as their raw comma-separated text). ``None`` values are skipped so a
+    caller can update just a subset. Returns the ``{ENV_KEY: value}`` map written.
+    """
+    env_path = Path(env_path)
+    written: dict = {}
+    for arg, env_key in _IDENTITY_ENV_KEYS.items():
+        if fields.get(arg) is None:
+            continue
+        value = str(fields[arg]).strip()
+        _upsert_env_line(env_path, env_key, value)
+        os.environ[env_key] = value
+        written[env_key] = value
+    return written
+
+
+def get_allowed_users(env_path: Path | str = DEFAULT_ENV_PATH) -> list[str]:
+    """Return the current ``ENTRA_ALLOWED_USERS`` allow-list read fresh from ``.env``.
+
+    A list of the comma-separated entries (emails / UPNs / object ids), with blanks
+    dropped and surrounding whitespace stripped. Reads the file directly (not the
+    process snapshot) so the Control Panel reflects edits made since startup.
+    """
+    raw = _read_env_value(Path(env_path), "ENTRA_ALLOWED_USERS")
+    return [u.strip() for u in raw.split(",") if u.strip()]
+
+
+def set_allowed_users(users, env_path: Path | str = DEFAULT_ENV_PATH) -> str:
+    """Persist ``users`` (a list/iterable) as ``ENTRA_ALLOWED_USERS`` in ``.env``.
+
+    De-duplicates case-insensitively while preserving order, joins with commas, and
+    writes via :func:`set_identity_config`. Returns the stored comma-separated text.
+    """
+    seen: set = set()
+    ordered: list = []
+    for u in users or []:
+        u = str(u).strip()
+        if not u:
+            continue
+        low = u.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        ordered.append(u)
+    value = ",".join(ordered)
+    set_identity_config(env_path=env_path, allowed_users=value)
+    return value
+
+
+def detect_current_user() -> str:
+    """Best-effort UPN of the Windows user currently signed in, or ``''``.
+
+    Runs ``whoami /upn``, which returns the Entra ID / Active Directory User
+    Principal Name (e.g. ``alice@contoso.com``) on a joined device. Returns ``''``
+    on any failure (e.g. a local-only account) so callers treat it as "unknown".
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["whoami", "/upn"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    return (proc.stdout or "").strip()
 
 
 def write_connection_card(

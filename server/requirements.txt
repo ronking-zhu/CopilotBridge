@@ -1,2 +1,6 @@
 botbuilder-integration-aiohttp==4.16.2
 python-dotenv==1.0.1
+# Microsoft Entra ID sign-in (AUTH_MODE=entra|both). Imported lazily by
+# server/auth.py; cryptography is required to verify RS256-signed tokens.
+PyJWT==2.13.0
+cryptography==48.0.0

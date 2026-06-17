@@ -179,26 +179,16 @@ class Controller:
                 logger.debug("tunnel watchdog tick failed: %s", exc)
 
 
-def _authorized(request: web.Request, token: str) -> bool:
-    if not token:
-        return True
-    provided = request.headers.get("X-API-Key")
-    if not provided:
-        auth = request.headers.get("Authorization", "")
-        if auth.lower().startswith("bearer "):
-            provided = auth[7:].strip()
-    return provided == token
-
-
 def setup_control_routes(app: web.Application, config) -> None:
     """Register the localhost control endpoints on ``app``."""
 
-    token = getattr(config, "CHAT_API_TOKEN", "")
+    from auth import Authenticator
+    authn = Authenticator(config)
 
     def _guard(request: web.Request):
-        # API key required (same trust model as the chat API). The control panel
-        # always talks to localhost; we never advertise these via the tunnel.
-        if not _authorized(request, token):
+        # Control Panel auth: the host's own API key (local helper) OR a valid
+        # Entra token. localhost-only in intent; never advertised via the tunnel.
+        if not authn.check_control(request):
             return json_response({"error": "unauthorized"}, status=401)
         return None
 

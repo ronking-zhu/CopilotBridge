@@ -105,7 +105,8 @@ async def run(info_q=None) -> None:
     # Generate a host-unique CHAT_API_TOKEN on first run (persisted to .env) so a
     # freshly-installed server "just works" and every machine gets its own key.
     # Must happen BEFORE importing app/config (config reads .env at import time).
-    from provisioning import ensure_api_token, ensure_tunnel_id, write_connection_card
+    from provisioning import (ensure_api_token, ensure_entra_tenant,
+                              ensure_tunnel_id, write_connection_card)
 
     api_key, created = ensure_api_token()
     if created:
@@ -117,6 +118,16 @@ async def run(info_q=None) -> None:
     if tid_created:
         log.info("[startup 0/%d] Using host-unique Dev Tunnel id '%s' (saved to .env).",
                  _TOTAL_STAGES, tunnel_id)
+    # First run: pre-fill ENTRA_TENANT_ID from the tenant THIS device is joined to,
+    # so an admin who later turns on Microsoft sign-in already has the right GUID.
+    # Detection never changes AUTH_MODE (sign-in stays off until explicitly enabled).
+    try:
+        _entra_tenant, _entra_created = ensure_entra_tenant()
+        if _entra_created:
+            log.info("[startup 0/%d] Detected Entra tenant '%s' from this device (saved to .env).",
+                     _TOTAL_STAGES, _entra_tenant)
+    except Exception as exc:  # noqa: BLE001 - detection is best-effort
+        log.debug("Entra tenant detection skipped: %s", exc)
 
     # ``info_q`` set => we're driven by the desktop GUI (gui mode): the GUI wizard
     # already handled the Dev Tunnel + AI choices on the main thread, so DON'T run
@@ -309,13 +320,15 @@ def _run_gui() -> None:
     import queue
     import threading
 
-    from provisioning import ensure_api_token, ensure_tunnel_id, read_connection_card
+    from provisioning import (ensure_api_token, ensure_entra_tenant,
+                              ensure_tunnel_id, read_connection_card)
 
     # Ensure the API key + host-unique Dev Tunnel id exist before we read config
     # for the wizard (a shared tunnel id collides across machines).
     try:
         ensure_api_token()
         ensure_tunnel_id()
+        ensure_entra_tenant()  # best-effort: pre-fill the device's Entra tenant
     except Exception as exc:  # noqa: BLE001
         log.warning("provisioning failed: %s", exc)
 

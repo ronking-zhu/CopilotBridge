@@ -18,12 +18,70 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import re
 import threading
 import urllib.request
 
 logger = logging.getLogger("copilot_bridge.gui")
 
 _DEVTUNNEL_DOWNLOAD = "https://aka.ms/TunnelsCliDownload"  # + /win-x64 | /win-arm64
+
+
+def app_version() -> str:
+    """Return the product version string (best-effort), e.g. '1.6.3'.
+
+    Reads it from the tiny dependency-free ``version`` module so this never has to
+    import the full application graph. Falls back to '' if unavailable.
+    """
+    try:
+        from version import __version__
+        return str(__version__)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _load_icon_image(size: int = 48):
+    """Return a Tk ``PhotoImage`` of the app icon at ~``size`` px, or ``None``.
+
+    Prefers the bundled ``icon-256.png`` (works without Pillow via Tk's PNG
+    support, subsampled to roughly ``size``). Located via ``resource_dir()`` so it
+    resolves both from source and from the frozen build. Best-effort: any failure
+    returns ``None`` and the caller simply shows text only.
+    """
+    try:
+        import tkinter as tk
+        from paths import resource_dir
+    except Exception:  # noqa: BLE001
+        return None
+    candidates = []
+    try:
+        candidates.append(resource_dir() / "assets" / "icon-256.png")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from paths import app_base_dir
+        candidates.append(app_base_dir() / "assets" / "icon-256.png")
+    except Exception:  # noqa: BLE001
+        pass
+    # Source tree: assets/ sits next to the server/ dir.
+    try:
+        from pathlib import Path
+        candidates.append(Path(__file__).resolve().parent.parent / "assets" / "icon-256.png")
+    except Exception:  # noqa: BLE001
+        pass
+    for png in candidates:
+        try:
+            if not png.is_file():
+                continue
+            img = tk.PhotoImage(file=str(png))
+            # icon-256.png is 256px; subsample to about the requested size.
+            factor = max(1, round(256 / max(1, size)))
+            if factor > 1:
+                img = img.subsample(factor, factor)
+            return img
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 def _download_devtunnel_to(dest) -> bool:
@@ -164,8 +222,12 @@ def show_connection_info(public_url, local_url, api_key, provider="copilot",
     lan_only = not public_url or public_url == local_url
     root = tk.Tk()
     root.title(parent_title + " — Connection info")
-    root.geometry("600x350")
-    root.resizable(False, False)
+    root.geometry("600x500")
+    root.resizable(True, True)
+    try:
+        root.minsize(600, 440)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         root.attributes("-topmost", True)
     except Exception:  # noqa: BLE001
@@ -211,6 +273,53 @@ def show_connection_info(public_url, local_url, api_key, provider="copilot",
 
     status = ttk.Label(frm, text="", foreground="#0a7")
     status.pack(anchor="w", pady=(6, 0))
+
+    # --- Optional Microsoft Entra ID sign-in: configure WHO may use this server ---
+    # Loaded lazily so this window also works on a fresh install. The same dialogs
+    # are used by the Control Panel; both write straight to .env.
+    def _load_cfg():
+        import importlib
+        import config as _c
+        importlib.reload(_c)
+        return _c.DefaultConfig()
+    try:
+        _cfg0 = _load_cfg()
+    except Exception:  # noqa: BLE001
+        _cfg0 = None
+    sec = ttk.LabelFrame(frm, text="Microsoft sign-in (Entra ID)", padding=10)
+    sec.pack(fill="x", pady=(10, 0))
+    sec_status = ttk.Label(sec, text=(_identity_summary(_cfg0) if _cfg0 else ""),
+                           foreground="#555")
+    sec_status.pack(side="left")
+
+    def _on_id_saved(mode):
+        try:
+            sec_status.config(text=f"Mode: {mode} \u2014 saved; restart the server to apply")
+            status.config(text="Saved Microsoft sign-in settings. Restart the server to apply.")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_users_saved(users):
+        try:
+            status.config(text=f"Saved allowed users ({len(users)}). Restart the server to apply.")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _open_identity():
+        try:
+            _identity_dialog(root, _load_cfg(), on_saved=_on_id_saved)
+        except Exception as exc:  # noqa: BLE001
+            status.config(text=f"Couldn't open sign-in settings: {exc}")
+
+    def _open_users():
+        try:
+            _users_dialog(root, _load_cfg(), on_saved=_on_users_saved)
+        except Exception as exc:  # noqa: BLE001
+            status.config(text=f"Couldn't open user manager: {exc}")
+
+    secbtns = ttk.Frame(sec); secbtns.pack(side="right")
+    ttk.Button(secbtns, text="Manage users\u2026", command=_open_users).pack(side="right", padx=(6, 0))
+    ttk.Button(secbtns, text="Configure\u2026", command=_open_identity).pack(side="right")
 
     bottom = ttk.Frame(frm); bottom.pack(side="bottom", fill="x", pady=(14, 0))
     ttk.Button(bottom, text="Close", command=root.destroy).pack(side="right")
@@ -448,6 +557,310 @@ def _force_kill_server(tunnel_id: str = "copilot-bridge") -> bool:
         return False
 
 
+def _identity_summary(cfg) -> str:
+    """One-line description of the current sign-in mode for the Control Panel."""
+    mode = (getattr(cfg, "AUTH_MODE", "apikey") or "apikey").strip().lower()
+    if mode == "apikey":
+        return "Mode: shared API key"
+    tid = (getattr(cfg, "ENTRA_TENANT_ID", "") or "").strip()
+    short = (tid[:8] + "\u2026") if tid else "(no tenant set)"
+    label = {"entra": "Microsoft only", "both": "API key or Microsoft"}.get(mode, mode)
+    return f"Mode: {label} \u00b7 tenant {short}"
+
+
+def _identity_dialog(parent, cfg, on_saved=None) -> None:
+    """Modal editor for the Microsoft Entra ID sign-in settings.
+
+    Writes the chosen values straight to ``.env`` (via
+    :func:`provisioning.set_identity_config`) so it works whether or not the server
+    is currently running; the caller is told a restart is needed to apply them.
+    """
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+
+    from provisioning import detect_entra_tenant, set_identity_config
+
+    def _join(v):
+        return ", ".join(v) if isinstance(v, (list, tuple)) else (v or "")
+
+    win = tk.Toplevel(parent)
+    win.title("Microsoft sign-in (Entra ID)")
+    win.transient(parent)
+    win.resizable(False, False)
+    try:
+        win.grab_set()
+    except Exception:  # noqa: BLE001
+        pass
+
+    f = ttk.Frame(win, padding=16)
+    f.pack(fill="both", expand=True)
+    f.columnconfigure(1, weight=1)
+
+    ttk.Label(f, text="Microsoft Entra ID sign-in",
+              font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+    ttk.Label(f, text="Let people sign in with their Microsoft work account instead of "
+                      "sharing one API key.", foreground="#555", wraplength=540,
+              justify="left").grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 12))
+
+    # Sign-in mode -----------------------------------------------------------
+    ttk.Label(f, text="Sign-in mode").grid(row=2, column=0, sticky="w", pady=4)
+    mode_var = tk.StringVar(value=(getattr(cfg, "AUTH_MODE", "apikey") or "apikey").strip().lower())
+    ttk.Combobox(f, textvariable=mode_var, state="readonly", width=14,
+                 values=["apikey", "both", "entra"]).grid(row=2, column=1, sticky="w", pady=4)
+    ttk.Label(f, text="apikey = shared key \u00b7 both = either \u00b7 entra = Microsoft only",
+              foreground="#888", font=("Segoe UI", 8)).grid(row=2, column=2, sticky="w", padx=6)
+
+    # Tenant id (+ Detect) ---------------------------------------------------
+    ttk.Label(f, text="Tenant ID").grid(row=3, column=0, sticky="w", pady=4)
+    e_tenant = ttk.Entry(f, width=40)
+    e_tenant.insert(0, getattr(cfg, "ENTRA_TENANT_ID", "") or "")
+    e_tenant.grid(row=3, column=1, sticky="we", pady=4)
+    msg = ttk.Label(f, text="", foreground="#0a7", wraplength=540, justify="left")
+
+    def do_detect():
+        tid, tname = detect_entra_tenant()
+        if tid:
+            e_tenant.delete(0, "end")
+            e_tenant.insert(0, tid)
+            msg.config(text=f"Detected this PC's tenant: {tname or tid}", foreground="#0a7")
+        else:
+            msg.config(text="Couldn't detect an Entra tenant on this PC "
+                            "(is it Microsoft Entra joined?).", foreground="#c80")
+
+    ttk.Button(f, text="Detect", width=8, command=do_detect).grid(row=3, column=2, sticky="w", padx=6)
+    ttk.Label(f, text="Your Entra directory (tenant) GUID. Use Detect to read this device's tenant.",
+              foreground="#888", font=("Segoe UI", 8), wraplength=540,
+              justify="left").grid(row=4, column=1, columnspan=2, sticky="w")
+
+    def field_row(r, label, value, hint):
+        ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=4)
+        e = ttk.Entry(f, width=46)
+        e.insert(0, value or "")
+        e.grid(row=r, column=1, columnspan=2, sticky="we", pady=4)
+        ttk.Label(f, text=hint, foreground="#888", font=("Segoe UI", 8), wraplength=540,
+                  justify="left").grid(row=r + 1, column=1, columnspan=2, sticky="w")
+        return e
+
+    e_client = field_row(5, "Client ID", getattr(cfg, "ENTRA_CLIENT_ID", ""),
+                         "Application (client) ID of the Copilot Bridge app registration.")
+    e_aud = field_row(7, "Audience", _join(getattr(cfg, "ENTRA_AUDIENCE", "")),
+                      "Access-token audience. Leave blank to use api://<client-id>.")
+    e_scopes = field_row(9, "Scopes", _join(getattr(cfg, "ENTRA_SCOPES", "")),
+                         "Scope the client requests. Blank = api://<client-id>/access_as_user.")
+    e_users = field_row(11, "Allow users", _join(getattr(cfg, "ENTRA_ALLOWED_USERS", "")),
+                        "Emails / UPNs or object ids, comma-separated.")
+    e_groups = field_row(13, "Allow groups", _join(getattr(cfg, "ENTRA_ALLOWED_GROUPS", "")),
+                         "Security-group object ids, comma-separated.")
+    e_roles = field_row(15, "Allow roles", _join(getattr(cfg, "ENTRA_ALLOWED_ROLES", "")),
+                        "App-role values, comma-separated. Recommended.")
+
+    msg.grid(row=17, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+    def do_save():
+        mode = mode_var.get().strip().lower()
+        tenant = e_tenant.get().strip()
+        client = e_client.get().strip()
+        aud = e_aud.get().strip()
+        users = e_users.get().strip()
+        groups = e_groups.get().strip()
+        roles = e_roles.get().strip()
+        if mode in ("entra", "both"):
+            if not tenant:
+                messagebox.showwarning("Microsoft sign-in",
+                                       "Enter (or Detect) a Tenant ID first.", parent=win)
+                return
+            if not client and not aud:
+                messagebox.showwarning("Microsoft sign-in",
+                                       "Enter the Client ID (or an Audience) from your "
+                                       "app registration.", parent=win)
+                return
+            if not aud and client:
+                aud = f"api://{client}"
+            if not (users or groups or roles):
+                if not messagebox.askyesno(
+                        "Microsoft sign-in",
+                        "No allow-list is set. Microsoft sign-in is fail-closed, so EVERY "
+                        "user will be denied until you add at least one allowed user, "
+                        "group, or role.\n\nSave anyway?", parent=win):
+                    return
+        set_identity_config(
+            auth_mode=mode, tenant_id=tenant, client_id=client, audience=aud,
+            scopes=e_scopes.get().strip(), allowed_users=users,
+            allowed_groups=groups, allowed_roles=roles,
+        )
+        win.destroy()
+        if on_saved:
+            on_saved(mode)
+
+    btns = ttk.Frame(f)
+    btns.grid(row=18, column=0, columnspan=3, sticky="e", pady=(14, 0))
+    ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right", padx=4)
+    ttk.Button(btns, text="Save", command=do_save).pack(side="right", padx=4)
+
+    win.update_idletasks()
+    try:
+        win.geometry(f"+{parent.winfo_rootx() + 40}+{parent.winfo_rooty() + 30}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_USER_GUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _valid_user_id(value: str) -> bool:
+    """True if ``value`` looks like an email / UPN or an Entra object id (GUID)."""
+    value = (value or "").strip()
+    return bool(_EMAIL_RE.match(value) or _USER_GUID_RE.match(value))
+
+
+def _users_dialog(parent, cfg, on_saved=None) -> None:
+    """Manage WHO may use this server: the ``ENTRA_ALLOWED_USERS`` allow-list.
+
+    A focused editor (add / remove individual people) so the owner can grant access
+    to specific Microsoft work accounts without hand-editing a comma-separated
+    string. Adding their own account here means only they are authorized, even
+    though anyone in the tenant can *authenticate* — the server is fail-closed and
+    denies any signed-in user who isn't on this list. Writes straight to ``.env``.
+    """
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+
+    from provisioning import detect_current_user, get_allowed_users, set_allowed_users
+
+    win = tk.Toplevel(parent)
+    win.title("Allowed users — who can access this server")
+    win.transient(parent)
+    win.resizable(False, False)
+    try:
+        win.grab_set()
+    except Exception:  # noqa: BLE001
+        pass
+
+    f = ttk.Frame(win, padding=16)
+    f.pack(fill="both", expand=True)
+    f.columnconfigure(0, weight=1)
+
+    ttk.Label(f, text="Allowed users", font=("Segoe UI", 12, "bold")).grid(
+        row=0, column=0, columnspan=2, sticky="w")
+    ttk.Label(f, text="Only these Microsoft work accounts may use this server. Anyone "
+                      "else in your organization can sign in but will be denied "
+                      "(fail-closed). Add your own account to keep it private to you.",
+              foreground="#555", wraplength=520, justify="left").grid(
+        row=1, column=0, columnspan=2, sticky="w", pady=(2, 12))
+
+    # Current allow-list, read fresh from .env so repeated opens stay accurate.
+    lb = tk.Listbox(f, height=7, activestyle="dotbox")
+    lb.grid(row=2, column=0, sticky="we", pady=(0, 2))
+    sb = ttk.Scrollbar(f, orient="vertical", command=lb.yview)
+    sb.grid(row=2, column=1, sticky="ns", pady=(0, 2))
+    lb.config(yscrollcommand=sb.set)
+
+    def _seed():
+        for u in get_allowed_users():
+            lb.insert("end", u)
+    _seed()
+
+    msg = ttk.Label(f, text="", foreground="#0a7", wraplength=520, justify="left")
+
+    def _current_items():
+        return [lb.get(i) for i in range(lb.size())]
+
+    def _add_value(value: str):
+        value = (value or "").strip()
+        if not value:
+            return
+        if not _valid_user_id(value):
+            messagebox.showwarning(
+                "Allowed users",
+                f"\u201c{value}\u201d doesn\u2019t look like an email / UPN "
+                "(name@domain) or an object id (GUID).", parent=win)
+            return
+        if value.lower() in {u.lower() for u in _current_items()}:
+            msg.config(text=f"{value} is already on the list.", foreground="#c80")
+            return
+        lb.insert("end", value)
+        lb.see("end")
+        msg.config(text=f"Added {value}.", foreground="#0a7")
+
+    # Add-by-typing row -----------------------------------------------------
+    addrow = ttk.Frame(f)
+    addrow.grid(row=3, column=0, columnspan=2, sticky="we", pady=(8, 0))
+    addrow.columnconfigure(0, weight=1)
+    e_add = ttk.Entry(addrow)
+    e_add.grid(row=0, column=0, sticky="we")
+    e_add.bind("<Return>", lambda _e: (_add_value(e_add.get()), e_add.delete(0, "end")))
+
+    def do_add():
+        _add_value(e_add.get())
+        e_add.delete(0, "end")
+        e_add.focus_set()
+
+    ttk.Button(addrow, text="Add", width=8, command=do_add).grid(row=0, column=1, padx=(8, 0))
+    ttk.Label(f, text="Enter an email / UPN (alice@contoso.com) or an object id (GUID), then Add.",
+              foreground="#888", font=("Segoe UI", 8)).grid(
+        row=4, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+    # Convenience + remove row ---------------------------------------------
+    tools = ttk.Frame(f)
+    tools.grid(row=5, column=0, columnspan=2, sticky="we", pady=(8, 0))
+
+    def do_add_me():
+        upn = detect_current_user()
+        if upn:
+            _add_value(upn)
+        else:
+            messagebox.showinfo(
+                "Allowed users",
+                "Couldn\u2019t detect this PC\u2019s Microsoft account "
+                "(is it signed in with a work account?). Type it in manually.",
+                parent=win)
+
+    def do_remove():
+        sel = list(lb.curselection())
+        if not sel:
+            msg.config(text="Select a user in the list to remove.", foreground="#c80")
+            return
+        for i in reversed(sel):
+            lb.delete(i)
+        msg.config(text="Removed.", foreground="#0a7")
+
+    ttk.Button(tools, text="Add this PC\u2019s account", command=do_add_me).pack(side="left")
+    ttk.Button(tools, text="Remove selected", command=do_remove).pack(side="left", padx=(8, 0))
+
+    msg.grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+    def do_save():
+        users = _current_items()
+        mode = (getattr(cfg, "AUTH_MODE", "apikey") or "apikey").strip().lower()
+        if not users and mode in ("entra", "both"):
+            if not messagebox.askyesno(
+                    "Allowed users",
+                    "The list is empty. With Microsoft sign-in on, the server is "
+                    "fail-closed, so EVERY user (including you) will be denied until "
+                    "you add at least one account.\n\nSave an empty list anyway?",
+                    parent=win):
+                return
+        set_allowed_users(users)
+        win.destroy()
+        if on_saved:
+            on_saved(users)
+
+    btns = ttk.Frame(f)
+    btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(14, 0))
+    ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right", padx=4)
+    ttk.Button(btns, text="Save", command=do_save).pack(side="right", padx=4)
+
+    e_add.focus_set()
+    win.update_idletasks()
+    try:
+        win.geometry(f"+{parent.winfo_rootx() + 60}+{parent.winfo_rooty() + 40}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -> None:
     """Desktop Control Panel: start/stop/restart the server and the Dev Tunnel.
 
@@ -498,8 +911,12 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
 
     root = tk.Tk()
     root.title(parent_title + " — Control Panel")
-    root.geometry("640x460")
-    root.resizable(False, False)
+    root.geometry("660x640")
+    root.resizable(True, True)
+    try:
+        root.minsize(640, 560)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         root.attributes("-topmost", True)
     except Exception:  # noqa: BLE001
@@ -507,10 +924,31 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
 
     frm = ttk.Frame(root, padding=18)
     frm.pack(fill="both", expand=True)
-    ttk.Label(frm, text="Copilot Bridge — Control Panel",
+
+    # ---- Header: app icon + title + version -------------------------------
+    header = ttk.Frame(frm)
+    header.pack(fill="x")
+    _icon_img = _load_icon_image(48)
+    if _icon_img is not None:
+        # Keep a reference on the widget so Tk doesn't garbage-collect the image.
+        ico = ttk.Label(header, image=_icon_img)
+        ico.image = _icon_img
+        ico.pack(side="left", padx=(0, 12))
+        try:
+            root.iconphoto(True, _icon_img)
+        except Exception:  # noqa: BLE001
+            pass
+    titlebox = ttk.Frame(header)
+    titlebox.pack(side="left", fill="x", expand=True)
+    ttk.Label(titlebox, text="Copilot Bridge — Control Panel",
               font=("Segoe UI", 14, "bold")).pack(anchor="w")
-    ttk.Label(frm, text="Manually start, stop, or restart the server and the Dev Tunnel.",
-              foreground="#555").pack(anchor="w", pady=(2, 12))
+    ttk.Label(titlebox, text="Manually start, stop, or restart the server and the Dev Tunnel.",
+              foreground="#555").pack(anchor="w", pady=(2, 0))
+    _ver = app_version()
+    ttk.Label(header, text=(f"v{_ver}" if _ver else ""),
+              foreground="#888", font=("Segoe UI", 10)).pack(side="right", anchor="n")
+
+    ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=(12, 12))
 
     # tkinter is main-thread-only: workers push results onto this queue and the
     # main-thread `pump` loop drains it. Never touch a widget off the main thread.
@@ -560,6 +998,29 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     e_public = field("Server URL")
     e_local = field("Local URL")
     e_key = field("API Key")
+
+    # ---- Identity / Microsoft sign-in ----
+    idrow = ttk.LabelFrame(frm, text="Identity / Microsoft sign-in", padding=12)
+    idrow.pack(fill="x", pady=(10, 0))
+    id_status = ttk.Label(idrow, text=_identity_summary(cfg), font=("Segoe UI", 10))
+    id_status.pack(side="left")
+
+    def _on_identity_saved(mode):
+        id_status.config(text=f"Mode: {mode} \u00b7 saved \u2014 click Restart to apply")
+        set_status("Saved Microsoft sign-in settings. Click Restart to apply them.")
+
+    def _on_users_saved(users):
+        n = len(users)
+        who = "no users (server locked)" if n == 0 else (
+            f"{n} user" + ("s" if n != 1 else ""))
+        set_status(f"Saved allowed users: {who}. Click Restart to apply.")
+
+    ttk.Button(idrow, text="Configure\u2026",
+               command=lambda: _identity_dialog(root, cfg, on_saved=_on_identity_saved)
+               ).pack(side="right")
+    ttk.Button(idrow, text="Manage users\u2026",
+               command=lambda: _users_dialog(root, cfg, on_saved=_on_users_saved)
+               ).pack(side="right", padx=(0, 6))
 
     statusline = ttk.Label(frm, text="", foreground="#0a7", wraplength=600, justify="left")
     statusline.pack(anchor="w", pady=(10, 0))

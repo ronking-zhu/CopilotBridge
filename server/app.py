@@ -39,8 +39,10 @@ logging.basicConfig(
 logger = logging.getLogger("copilot_bridge")
 
 # Product version. Surfaced in /health so clients and the upgrade flow can see
-# which build is running. Keep in step with the installer (-Version) at release.
-__version__ = "1.4.4"
+# which build is running. Defined in version.py (a tiny, dependency-free module)
+# so the desktop Control Panel can read it without importing this whole module.
+# Keep version.py in step with the installer (-Version) at release.
+from version import __version__
 
 CONFIG = DefaultConfig()
 
@@ -68,6 +70,24 @@ async def messages(req: Request) -> Response:
 
 
 async def health(req: Request) -> Response:  # noqa: ARG001
+    # Report the REAL request-auth posture. The new identity layer (AUTH_MODE)
+    # supersedes the legacy Bot-Framework/Teams indicators for the web+mobile
+    # clients, so surface it here; fall back to the old signals otherwise.
+    identity_mode = (getattr(CONFIG, "AUTH_MODE", "apikey") or "apikey").strip().lower()
+    if identity_mode in ("entra", "both"):
+        auth_mode = identity_mode
+        allowlist = (len(getattr(CONFIG, "ENTRA_ALLOWED_USERS", []))
+                     + len(getattr(CONFIG, "ENTRA_ALLOWED_GROUPS", []))
+                     + len(getattr(CONFIG, "ENTRA_ALLOWED_ROLES", [])))
+    elif CONFIG.APP_ID:
+        auth_mode = "production"
+        allowlist = len(CONFIG.ALLOWED_USER_IDS)
+    elif getattr(CONFIG, "CHAT_API_TOKEN", ""):
+        auth_mode = "apikey"
+        allowlist = len(CONFIG.ALLOWED_USER_IDS)
+    else:
+        auth_mode = "local-no-auth"
+        allowlist = len(CONFIG.ALLOWED_USER_IDS)
     return json_response(
         {
             "status": "ok",
@@ -77,8 +97,8 @@ async def health(req: Request) -> Response:  # noqa: ARG001
             "providerAvailable": getattr(RUNNER, "available", True),
             "scope": CONFIG.COPILOT_SCOPE,
             "workdir": RUNNER.workdir,
-            "authMode": "production" if CONFIG.APP_ID else "local-no-auth",
-            "allowlistEntries": len(CONFIG.ALLOWED_USER_IDS),
+            "authMode": auth_mode,
+            "allowlistEntries": allowlist,
             "time": datetime.now(timezone.utc).isoformat(),
         }
     )

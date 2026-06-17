@@ -53,11 +53,11 @@ Write-Host "Ensuring PyInstaller is installed..." -ForegroundColor Cyan
 $hidden = @(
     "app", "config", "webchat", "bot", "copilot_runner", "copilot_sessions",
     "session_store", "provisioning", "paths", "devtunnel", "setup", "gui",
-    "control",
+    "control", "auth", "version",
     "providers", "providers.base", "providers.registry", "providers.copilot",
     "providers.claude", "providers.openai"
 )
-$collect = @("botbuilder", "botframework", "aiohttp", "dotenv", "jwt", "msrest", "msal")
+$collect = @("botbuilder", "botframework", "aiohttp", "dotenv", "jwt", "cryptography", "msrest", "msal")
 
 $mode = if ($OneFile) { "--onefile" } else { "--onedir" }
 $pyiArgs = @(
@@ -70,6 +70,13 @@ $pyiArgs = @(
     "--workpath", (Join-Path $root "build\pyinstaller"),
     "--specpath", (Join-Path $root "build")
 )
+
+# Bundle the PNG app icon so the desktop Control Panel can display it at runtime
+# (resolved via resource_dir()/assets/icon-256.png from _MEIPASS when frozen).
+$iconPng = Join-Path $root "assets\icon-256.png"
+if (Test-Path $iconPng) {
+    $pyiArgs += @("--add-data", "$iconPng;assets")
+}
 foreach ($h in $hidden)  { $pyiArgs += @("--hidden-import", $h) }
 foreach ($c in $collect) { $pyiArgs += @("--collect-all", $c) }
 

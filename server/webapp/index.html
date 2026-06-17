@@ -178,8 +178,21 @@
     <h2>设置</h2>
     <label>服务器地址（默认当前地址，一般不用改）</label>
     <input id="baseInput" placeholder="https://xxx-3978.xxx.devtunnels.ms">
-    <label>API Token</label>
-    <input id="tokenInput" type="password" placeholder="粘贴 .env 里的 CHAT_API_TOKEN">
+
+    <div id="msBlock" style="display:none">
+      <label>Microsoft 账号登录</label>
+      <div id="msStatus" class="hint" style="margin:0 0 8px">未登录</div>
+      <div class="row" style="margin-bottom:4px">
+        <button id="msSignIn" type="button" class="primary">使用 Microsoft 登录</button>
+        <button id="msSignOut" type="button" style="display:none">退出登录</button>
+      </div>
+    </div>
+
+    <div id="tokenBlock">
+      <label>API Token</label>
+      <input id="tokenInput" type="password" placeholder="粘贴 .env 里的 CHAT_API_TOKEN">
+    </div>
+
     <div class="row">
       <button id="cancelBtn" type="button">取消</button>
       <button id="saveBtn" type="button" class="primary">保存</button>
@@ -188,6 +201,7 @@
   </div>
 </div>
 
+<script src="/vendor/msal-browser.min.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 const log = $('#log'), input = $('#input'), form = $('#form'), sendBtn = $('#send');
@@ -201,12 +215,28 @@ let sessions = [];
 let copilotSessions = [];   // cache of the Copilot-CLI native list, for client-side search
 let pending = [];           // images picked but not yet sent: [{name, mime, dataUrl, b64}]
 
-function hdr(){ return {'Content-Type':'application/json','X-API-Key':token,'X-Tunnel-Skip-AntiPhishing-Page':'true'}; }
+// Microsoft Entra ID sign-in (optional; driven by /api/webconfig). When the user
+// is signed in we send the Entra access token as a Bearer header instead of the key.
+let authCfg = null;         // the server's /api/webconfig payload
+let msalApp = null;         // MSAL PublicClientApplication, when Entra is configured
+let msAccount = null;       // the signed-in account
+let msToken = '';           // current Entra access token
+let msTokenExp = 0;         // its expiry (epoch ms)
+
+function hdr(){
+  const h = {'Content-Type':'application/json','X-Tunnel-Skip-AntiPhishing-Page':'true'};
+  if(msToken) h['Authorization'] = 'Bearer ' + msToken;
+  else if(token) h['X-API-Key'] = token;
+  return h;
+}
 function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 function scroll(){ log.scrollTop = log.scrollHeight; }
 
 async function api(method, path, body){
+  if(msalApp && msAccount && (!msToken || Date.now() > msTokenExp - 300000)){
+    await acquireToken(true);
+  }
   const opt = { method, headers: hdr() };
   if(body !== undefined) opt.body = JSON.stringify(body);
   const r = await fetch(base + path, opt);
@@ -299,7 +329,9 @@ function addMsg(kind, text, images){
 // (img tags can't send the X-API-Key header, so the server also accepts ?key=).
 function attUrl(a){
   let u = base + a.url;
-  if(token) u += (u.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(token);
+  const sep = () => (u.includes('?') ? '&' : '?');
+  if(msToken) u += sep() + 'access_token=' + encodeURIComponent(msToken);
+  else if(token) u += sep() + 'key=' + encodeURIComponent(token);
   return u;
 }
 function fileToDataUrl(file){
@@ -596,11 +628,86 @@ input.addEventListener('paste', e=>{
 });
 updateSendEnabled();
 
+/* ---------- Microsoft Entra ID sign-in ---------- */
+function msScopes(){
+  const e = (authCfg && authCfg.entra) || {};
+  if(Array.isArray(e.scopes) && e.scopes.length) return e.scopes;
+  return e.clientId ? ['api://' + e.clientId + '/access_as_user'] : [];
+}
+async function initAuth(cfg){
+  authCfg = cfg || {};
+  const e = authCfg.entra;
+  msalApp = null; msAccount = null;
+  if(!e || !e.clientId || !(e.authority || e.tenantId) || typeof msal === 'undefined') return;
+  try{
+    msalApp = new msal.PublicClientApplication({
+      auth: {
+        clientId: e.clientId,
+        authority: e.authority || ('https://login.microsoftonline.com/' + e.tenantId),
+        redirectUri: location.origin + '/',
+        // Process the sign-in response on whatever page we land on and stay put.
+        // The default (true) makes MSAL navigate again to the page that started
+        // login; over a Dev Tunnel each extra top-level navigation risks the
+        // one-time anti-phishing interstitial, which breaks the redirect on phones.
+        navigateToLoginRequestUrl: false,
+      },
+      cache: { cacheLocation: 'localStorage' },
+    });
+    await msalApp.initialize();
+    const res = await msalApp.handleRedirectPromise();
+    if(res && res.account) msAccount = res.account;
+    if(!msAccount){
+      const accts = msalApp.getAllAccounts();
+      if(accts.length) msAccount = accts[0];
+    }
+    if(msAccount) await acquireToken(true);
+  }catch(err){ console.warn('MSAL init failed', err); msalApp = null; }
+}
+async function acquireToken(silentOnly){
+  if(!msalApp || !msAccount) return '';
+  const scopes = msScopes();
+  try{
+    const r = await msalApp.acquireTokenSilent({ account: msAccount, scopes });
+    msToken = r.accessToken;
+    msTokenExp = r.expiresOn ? r.expiresOn.getTime() : (Date.now() + 50*60*1000);
+    return msToken;
+  }catch(err){
+    if(silentOnly) return '';
+    try{ await msalApp.acquireTokenRedirect({ scopes, account: msAccount }); }catch(e){}
+    return '';
+  }
+}
+async function signIn(){
+  if(!msalApp){ addMsg('err','此服务未配置 Microsoft 登录。'); return; }
+  try{ await msalApp.loginRedirect({ scopes: msScopes() }); }
+  catch(err){ addMsg('err','登录失败：' + ((err && err.message) || err)); }
+}
+async function signOut(){
+  msToken=''; msTokenExp=0;
+  const acct = msAccount; msAccount=null;
+  if(msalApp && acct){ try{ await msalApp.logoutRedirect({ account: acct }); }catch(e){} }
+}
+function updateAuthUI(){
+  const mode = (authCfg && authCfg.authMode) || 'apikey';
+  const hasEntra = !!(authCfg && authCfg.entra && authCfg.entra.clientId);
+  const showMs = hasEntra && (mode === 'entra' || mode === 'both');
+  const msB = $('#msBlock'), tkB = $('#tokenBlock');
+  if(msB) msB.style.display = showMs ? '' : 'none';
+  if(tkB) tkB.style.display = (mode === 'entra') ? 'none' : '';
+  const signedIn = !!msAccount;
+  const si = $('#msSignIn'), so = $('#msSignOut'), st = $('#msStatus');
+  if(si) si.style.display = signedIn ? 'none' : '';
+  if(so) so.style.display = signedIn ? '' : 'none';
+  if(st) st.textContent = signedIn ? ('已登录：' + (msAccount.username || msAccount.name || '')) : '未登录';
+}
+
 /* ---------- settings ---------- */
 const modal = $('#modal');
-function openModal(){ $('#baseInput').value = base; $('#tokenInput').value = token; modal.classList.add('show'); }
+function openModal(){ $('#baseInput').value = base; $('#tokenInput').value = token; updateAuthUI(); modal.classList.add('show'); }
 $('#setBtn').onclick = openModal;
 $('#cancelBtn').onclick = ()=> modal.classList.remove('show');
+$('#msSignIn').onclick = ()=> signIn();
+$('#msSignOut').onclick = async ()=>{ await signOut(); updateAuthUI(); };
 $('#saveBtn').onclick = async ()=>{
   base = ($('#baseInput').value.trim() || location.origin).replace(/\/$/,'');
   token = $('#tokenInput').value.trim();
@@ -611,12 +718,20 @@ $('#saveBtn').onclick = async ()=>{
 
 /* ---------- boot ---------- */
 async function boot(quiet){
+  let cfg;
   try{
-    const cfg = await api('GET','/api/webconfig');
-    if(cfg.authRequired && !token){
-      addMsg('bot','⚠️ 这个服务需要 API Token，请点右上角 ⚙ 填写。'); openModal(); return;
-    }
+    cfg = await api('GET','/api/webconfig');
   }catch(e){ if(!quiet) addMsg('err','连不上服务器：' + e.message); return; }
+  await initAuth(cfg);
+  updateAuthUI();
+  const mode = cfg.authMode || (cfg.authRequired ? 'apikey' : 'none');
+  if(mode === 'entra'){
+    if(!msToken){ addMsg('bot','请用 Microsoft 账号登录（点右上角 ⚙）。'); openModal(); return; }
+  } else if(mode === 'both'){
+    if(!msToken && !token){ addMsg('bot','请用 Microsoft 账号登录，或填写 API Token（点右上角 ⚙）。'); openModal(); return; }
+  } else {
+    if(cfg.authRequired && !token){ addMsg('bot','⚠️ 这个服务需要 API Token，请点右上角 ⚙ 填写。'); openModal(); return; }
+  }
   await loadSessions();
   if(sessions.length) await openSession(sessions.some(s=>s.id===sid) ? sid : sessions[0].id);
   else await newSession();
