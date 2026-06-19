@@ -578,7 +578,9 @@ def _identity_dialog(parent, cfg, on_saved=None) -> None:
     import tkinter as tk
     from tkinter import ttk, messagebox
 
-    from provisioning import detect_entra_tenant, set_identity_config
+    from provisioning import (build_access_request_mailto, detect_current_user,
+                              detect_entra_tenant, make_request_code, make_share_code,
+                              parse_share_code, read_connection_card, set_identity_config)
 
     def _join(v):
         return ", ".join(v) if isinstance(v, (list, tuple)) else (v or "")
@@ -601,6 +603,25 @@ def _identity_dialog(parent, cfg, on_saved=None) -> None:
     ttk.Label(f, text="Let people sign in with their Microsoft work account instead of "
                       "sharing one API key.", foreground="#555", wraplength=540,
               justify="left").grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 12))
+
+    # Heads-up when the built-in TEST Entra ID (the maintainer's) is still in use,
+    # so nobody mistakes the pre-filled defaults for their own app registration.
+    try:
+        from config import (TEST_ENTRA_TENANT_ID, TEST_ENTRA_CLIENT_ID,
+                            TEST_ENTRA_ADMIN_CONTACT)
+    except Exception:  # noqa: BLE001
+        TEST_ENTRA_TENANT_ID = TEST_ENTRA_CLIENT_ID = TEST_ENTRA_ADMIN_CONTACT = ""
+    _cur_tid = (getattr(cfg, "ENTRA_TENANT_ID", "") or "").strip().lower()
+    _cur_cid = (getattr(cfg, "ENTRA_CLIENT_ID", "") or "").strip().lower()
+    if TEST_ENTRA_TENANT_ID and _cur_tid == TEST_ENTRA_TENANT_ID.lower() \
+            and _cur_cid == TEST_ENTRA_CLIENT_ID.lower():
+        tk.Label(win,
+                 text=("\u26a0  These fields are pre-filled with "
+                       f"{TEST_ENTRA_ADMIN_CONTACT or 'the maintainer'}\u2019s "
+                       "TEST Entra ID. Try Microsoft sign-in with it, or replace it "
+                       "with your own app registration for production."),
+                 bg="#FFF4CE", fg="#5C4400", justify="left", anchor="w",
+                 wraplength=560, padx=12, pady=8).pack(side="top", fill="x", before=f)
 
     # Sign-in mode -----------------------------------------------------------
     ttk.Label(f, text="Sign-in mode").grid(row=2, column=0, sticky="w", pady=4)
@@ -687,13 +708,153 @@ def _identity_dialog(parent, cfg, on_saved=None) -> None:
             auth_mode=mode, tenant_id=tenant, client_id=client, audience=aud,
             scopes=e_scopes.get().strip(), allowed_users=users,
             allowed_groups=groups, allowed_roles=roles,
+            admin_contact=_admin["contact"],
         )
         win.destroy()
         if on_saved:
             on_saved(mode)
 
+    # Admin's email travels inside a share code so a colleague's “Request access”
+    # can address the approval mail automatically. Held here, persisted on Save.
+    _admin = {"contact": (getattr(cfg, "ENTRA_ADMIN_CONTACT", "") or "").strip()}
+
+    # --- Share / import the sign-in config (so a colleague needn't retype it) ---
+    def do_share():
+        tenant = e_tenant.get().strip()
+        client = e_client.get().strip()
+        if not tenant or not client:
+            messagebox.showwarning("Share sign-in config",
+                                   "Enter (or Detect) the Tenant ID and Client ID first.",
+                                   parent=win)
+            return
+        aud = e_aud.get().strip() or f"api://{client}"
+        scopes = e_scopes.get().strip() or f"api://{client}/access_as_user"
+        # Ask for the admin contact email (pre-filled) so colleagues can request access.
+        pop = tk.Toplevel(win)
+        pop.title("Share sign-in config")
+        pop.transient(win)
+        try:
+            pop.grab_set()
+        except Exception:  # noqa: BLE001
+            pass
+        pf = ttk.Frame(pop, padding=14)
+        pf.pack(fill="both", expand=True)
+        ttk.Label(pf, text="Your email (so colleagues can email you an access request):",
+                  wraplength=460, justify="left").pack(anchor="w")
+        e_admin = ttk.Entry(pf, width=52)
+        e_admin.insert(0, _admin["contact"])
+        e_admin.pack(fill="x", pady=(4, 8))
+        ttk.Label(pf, text="Send the code below to your colleague. They paste it with "
+                           "\u201cImport code\u201d (or run setup-entra.ps1 -FromConfig <code>).",
+                  wraplength=460, justify="left").pack(anchor="w")
+        ttk.Label(pf, text="It contains only tenant / client / audience / scopes (+ your "
+                           "email) \u2014 no API key, no allow-list, no secret.",
+                  foreground="#888", font=("Segoe UI", 8), wraplength=460,
+                  justify="left").pack(anchor="w", pady=(2, 8))
+        box = tk.Text(pf, height=3, width=56, wrap="char")
+        box.pack(fill="x")
+        status2 = ttk.Label(pf, text="", foreground="#0a7")
+        status2.pack(anchor="w", pady=(6, 0))
+
+        def regen():
+            admin = e_admin.get().strip()
+            _admin["contact"] = admin
+            code = make_share_code(tenant, client, aud, scopes, admin)
+            box.configure(state="normal"); box.delete("1.0", "end")
+            box.insert("1.0", code); box.configure(state="disabled")
+            try:
+                win.clipboard_clear(); win.clipboard_append(code)
+            except Exception:  # noqa: BLE001
+                pass
+            status2.config(text="Copied to clipboard.")
+        regen()
+        brow = ttk.Frame(pf); brow.pack(fill="x", pady=(10, 0))
+        ttk.Button(brow, text="Close", command=pop.destroy).pack(side="right", padx=4)
+        ttk.Button(brow, text="Update / copy", command=regen).pack(side="right", padx=4)
+
+    def do_import():
+        pop = tk.Toplevel(win)
+        pop.title("Import sign-in config")
+        pop.transient(win)
+        try:
+            pop.grab_set()
+        except Exception:  # noqa: BLE001
+            pass
+        pf = ttk.Frame(pop, padding=14)
+        pf.pack(fill="both", expand=True)
+        ttk.Label(pf, text="Paste the code your colleague sent you "
+                           "(starts with CBCFG1.):", wraplength=440,
+                  justify="left").pack(anchor="w")
+        box = tk.Text(pf, height=3, width=54, wrap="char")
+        box.pack(fill="x", pady=(6, 8))
+        box.focus_set()
+
+        def apply_code():
+            code = box.get("1.0", "end").strip()
+            try:
+                cfg2 = parse_share_code(code)
+            except ValueError as exc:
+                messagebox.showwarning("Import sign-in config",
+                                       f"That doesn\u2019t look like a valid code.\n\n{exc}",
+                                       parent=pop)
+                return
+            mode_var.set("entra")
+            for entry, val in ((e_tenant, cfg2["tenant_id"]), (e_client, cfg2["client_id"]),
+                               (e_aud, cfg2["audience"]), (e_scopes, cfg2["scopes"])):
+                entry.delete(0, "end")
+                entry.insert(0, val)
+            if cfg2.get("admin_contact"):
+                _admin["contact"] = cfg2["admin_contact"]
+            pop.destroy()
+            tail = (" You can now use \u201cRequest access\u201d to email the admin."
+                    if _admin["contact"] else "")
+            msg.config(text="Imported sign-in config. Add yourself under \u201cAllow users\u201d, "
+                            "then Save." + tail, foreground="#0a7")
+
+        row = ttk.Frame(pf); row.pack(fill="x")
+        ttk.Button(row, text="Cancel", command=pop.destroy).pack(side="right", padx=4)
+        ttk.Button(row, text="Import", command=apply_code).pack(side="right", padx=4)
+
+    def do_request():
+        """Colleague: email the admin a pre-filled access request (allow-list + redirect)."""
+        import webbrowser
+        admin = _admin["contact"]
+        if not admin:
+            messagebox.showinfo(
+                "Request access",
+                "No admin email is set. Import the code your admin sent (it carries "
+                "their email), or ask them for it.", parent=win)
+            return
+        # The full allow-list the colleague wants granted, read straight from the
+        # “Allow users” field; who is asking = first entry, else this PC's account.
+        users = [u.strip() for u in e_users.get().split(",") if u.strip()]
+        account = users[0] if users else detect_current_user()
+        if not account and not users:
+            messagebox.showinfo("Request access",
+                                "Add your account under \u201cAllow users\u201d first.", parent=win)
+            return
+        card = read_connection_card() or {}
+        public_url = card.get("publicUrl") or card.get("serverUrl") or ""
+        tenant = e_tenant.get().strip()
+        rcode = make_request_code(account, public_url, tenant, users)
+        mailto = build_access_request_mailto(admin, account, public_url, rcode,
+                                             allowed_users=users)
+        try:
+            webbrowser.open(mailto)
+            n = len(users) or 1
+            msg.config(text=f"Opened an email to {admin} with your allow-list "
+                            f"({n} account{'s' if n != 1 else ''}) and redirect URL. "
+                            "Review and Send it.", foreground="#0a7")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showwarning("Request access",
+                                   f"Couldn\u2019t open your mail client: {exc}\n\n"
+                                   f"Send this to {admin} manually:\n\n{rcode}", parent=win)
+
     btns = ttk.Frame(f)
-    btns.grid(row=18, column=0, columnspan=3, sticky="e", pady=(14, 0))
+    btns.grid(row=18, column=0, columnspan=3, sticky="we", pady=(14, 0))
+    ttk.Button(btns, text="Share code\u2026", command=do_share).pack(side="left", padx=2)
+    ttk.Button(btns, text="Import code\u2026", command=do_import).pack(side="left", padx=2)
+    ttk.Button(btns, text="Request access\u2026", command=do_request).pack(side="left", padx=2)
     ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right", padx=4)
     ttk.Button(btns, text="Save", command=do_save).pack(side="right", padx=4)
 

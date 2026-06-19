@@ -22,7 +22,7 @@
     .\scripts\build-installer.ps1 -Version 1.2.0 -SkipBuild
 #>
 param(
-    [string]$Version = "1.6.3",
+    [string]$Version = "1.7.1",
     [switch]$SkipBuild
 )
 

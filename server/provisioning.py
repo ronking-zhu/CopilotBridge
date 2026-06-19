@@ -209,6 +209,9 @@ _IDENTITY_ENV_KEYS = {
     "allowed_users": "ENTRA_ALLOWED_USERS",
     "allowed_groups": "ENTRA_ALLOWED_GROUPS",
     "allowed_roles": "ENTRA_ALLOWED_ROLES",
+    # Who to email an access request to (the admin who owns the app registration).
+    # Carried in a share code so a colleague's “Request access” knows where to send.
+    "admin_contact": "ENTRA_ADMIN_CONTACT",
 }
 
 
@@ -285,6 +288,201 @@ def detect_current_user() -> str:
     except (OSError, ValueError, subprocess.SubprocessError):
         return ""
     return (proc.stdout or "").strip()
+
+
+# A short, human-pasteable prefix so a share code is recognizable and versioned.
+_SHARE_PREFIX = "CBCFG1."
+
+
+def _b64url_encode(raw: bytes) -> str:
+    import base64
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(text: str) -> bytes:
+    import base64
+    pad = "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(text + pad)
+
+
+def make_share_code(tenant_id, client_id, audience="", scopes="", admin_contact="") -> str:
+    """Pack the **non-secret** Entra sign-in config into a shareable code.
+
+    A colleague who runs their own Copilot Bridge against the same tenant/app pastes
+    this instead of hand-typing tenant id, client id, audience and scopes. It carries
+    ONLY public identifiers — never the API key, the allow-list, or any secret — so it
+    is safe to send over chat/email. ``audience``/``scopes`` may be a list or a
+    comma-separated string. ``admin_contact`` (optional) is the admin's email so the
+    colleague's “Request access” can address the approval mail automatically.
+    Returns ``''`` if there's nothing meaningful to share.
+    """
+    import json
+
+    def _csv(v):
+        if isinstance(v, (list, tuple)):
+            return ",".join(str(x).strip() for x in v if str(x).strip())
+        return str(v or "").strip()
+
+    tenant_id = str(tenant_id or "").strip()
+    client_id = str(client_id or "").strip()
+    if not tenant_id or not client_id:
+        return ""
+    payload = {
+        "v": 1,
+        "t": tenant_id,
+        "c": client_id,
+        "a": _csv(audience),
+        "s": _csv(scopes),
+    }
+    if str(admin_contact or "").strip():
+        payload["m"] = str(admin_contact).strip()
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return _SHARE_PREFIX + _b64url_encode(raw)
+
+
+def parse_share_code(code) -> dict:
+    """Decode a :func:`make_share_code` string back to identity fields.
+
+    Returns ``{tenant_id, client_id, audience, scopes}`` (audience/scopes as the raw
+    comma-separated strings). Raises ``ValueError`` if the code is malformed, so the
+    caller can show a friendly "that doesn't look like a valid code" message.
+    """
+    import json
+
+    if not code:
+        raise ValueError("empty share code")
+    code = str(code).strip()
+    if not code.startswith(_SHARE_PREFIX):
+        raise ValueError("not a Copilot Bridge sign-in code")
+    try:
+        data = json.loads(_b64url_decode(code[len(_SHARE_PREFIX):]).decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"corrupt share code: {exc}") from exc
+    tenant_id = str(data.get("t", "")).strip()
+    client_id = str(data.get("c", "")).strip()
+    if not tenant_id or not client_id:
+        raise ValueError("share code is missing the tenant or client id")
+    return {
+        "tenant_id": tenant_id,
+        "client_id": client_id,
+        "audience": str(data.get("a", "")).strip(),
+        "scopes": str(data.get("s", "")).strip(),
+        "admin_contact": str(data.get("m", "")).strip(),
+    }
+
+
+# Access-request code: a colleague packs WHO they are + their redirect URL so the
+# admin can approve (guest invite + register redirect URI) in one command.
+_REQUEST_PREFIX = "CBREQ1."
+
+
+def make_request_code(account, public_url, tenant_id="", allowed_users="") -> str:
+    """Pack a colleague's access request into a code.
+
+    Carries the requester's account, the FULL allow-list they want granted, and
+    their Dev Tunnel redirect URL. The admin runs ``setup-entra.ps1 -ApproveRequest
+    <code>`` (or pastes it) to invite those accounts as guests and register the
+    redirect URI. Carries no secret. ``allowed_users`` may be a list or a
+    comma-separated string. Returns ``''`` if ``account`` is empty.
+    """
+    import json
+
+    def _csv(v):
+        if isinstance(v, (list, tuple)):
+            return ",".join(str(x).strip() for x in v if str(x).strip())
+        return str(v or "").strip()
+
+    account = str(account or "").strip()
+    if not account:
+        return ""
+    url = str(public_url or "").strip()
+    if url:
+        url = url.rstrip("/") + "/"
+    payload = {"v": 1, "u": account, "r": url, "t": str(tenant_id or "").strip()}
+    users = _csv(allowed_users)
+    if users:
+        payload["al"] = users
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return _REQUEST_PREFIX + _b64url_encode(raw)
+
+
+def parse_request_code(code) -> dict:
+    """Decode a :func:`make_request_code` string.
+
+    Returns ``{account, public_url, tenant_id, allowed_users}`` (the last as the raw
+    comma-separated string). Raises ``ValueError`` if malformed so the caller can
+    show a friendly message.
+    """
+    import json
+
+    if not code:
+        raise ValueError("empty request code")
+    code = str(code).strip()
+    if not code.startswith(_REQUEST_PREFIX):
+        raise ValueError("not a Copilot Bridge access-request code")
+    try:
+        data = json.loads(_b64url_decode(code[len(_REQUEST_PREFIX):]).decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"corrupt request code: {exc}") from exc
+    account = str(data.get("u", "")).strip()
+    if not account:
+        raise ValueError("request code is missing the account")
+    return {
+        "account": account,
+        "public_url": str(data.get("r", "")).strip(),
+        "tenant_id": str(data.get("t", "")).strip(),
+        "allowed_users": str(data.get("al", "")).strip(),
+    }
+
+
+def build_access_request_mailto(admin_email, account, public_url,
+                                request_code="", app_name="Copilot Bridge",
+                                allowed_users="") -> str:
+    """Return a ``mailto:`` URL that opens a pre-filled access-request email.
+
+    The body lists the colleague's FULL allow-list (every account to invite as a
+    guest + add to ``ENTRA_ALLOWED_USERS``) and their Dev Tunnel redirect URL, plus
+    the machine-readable request code. Opening it (e.g. via ``webbrowser.open``)
+    launches the user's mail client with the admin addressed — no SMTP/credentials
+    needed. ``allowed_users`` may be a list or a comma-separated string.
+    """
+    from urllib.parse import quote
+
+    def _as_users(v):
+        if isinstance(v, (list, tuple)):
+            return [str(x).strip() for x in v if str(x).strip()]
+        return [x.strip() for x in str(v or "").split(",") if x.strip()]
+
+    account = str(account or "").strip()
+    public_url = str(public_url or "").strip()
+    users = _as_users(allowed_users) or ([account] if account else [])
+    who = account or (users[0] if users else "a colleague")
+    if users:
+        users_block = "\n".join(f"    - {u}" for u in users)
+    else:
+        users_block = "    (none yet — add yourself under \u201cAllow users\u201d first)"
+    subject = f"[{app_name}] Access request from {who}"
+    lines = [
+        "Hi,",
+        "",
+        f"Please grant access to {app_name} (Microsoft Entra sign-in).",
+        "",
+        "  Accounts to invite as guests + add to the allow-list:",
+        users_block,
+        "",
+        f"  Redirect URI (Dev Tunnel): {public_url or '(starting the server will create it)'}",
+        "",
+        "To approve in one command (you need rights to the app registration):",
+        f"  .\\scripts\\setup-entra.ps1 -ApproveRequest {request_code or '<request-code>'}",
+        "",
+        "Or do it manually: invite the account(s) above as guests in Entra, and add",
+        "the redirect URI to the app\u2019s Single-page application platform.",
+    ]
+    if request_code:
+        lines += ["", "Request code:", request_code]
+    body = "\n".join(lines)
+    to = quote(str(admin_email or "").strip())
+    return f"mailto:{to}?subject={quote(subject)}&body={quote(body)}"
 
 
 def write_connection_card(

@@ -29,6 +29,19 @@ def _as_list(value):
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+# --- Built-in TEST Entra ID (zhurongqing@outlook.com) -------------------------
+# Ship a working Microsoft sign-in config out of the box so people can try Entra
+# sign-in without first standing up their own app registration. These are NON
+# secret identifiers for a personal *test* tenant owned by zhurongqing@outlook.com;
+# replace them with your own app registration for production. Any value the user
+# sets (env / .env / Control Panel → Save) overrides the matching default below.
+TEST_ENTRA_TENANT_ID = "53f87c5f-245b-41f9-8791-e4a42a2dc058"
+TEST_ENTRA_CLIENT_ID = "4b1ffcfa-7e64-4765-84ad-1796ca93ff98"
+TEST_ENTRA_AUDIENCE = f"api://{TEST_ENTRA_CLIENT_ID},{TEST_ENTRA_CLIENT_ID}"
+TEST_ENTRA_SCOPES = f"api://{TEST_ENTRA_CLIENT_ID}/access_as_user"
+TEST_ENTRA_ADMIN_CONTACT = "zhurongqing@outlook.com"
+
+
 class DefaultConfig:
     """Bridge configuration."""
 
@@ -104,11 +117,13 @@ class DefaultConfig:
     #   'organizations'/'common' for multi-tenant. ENTRA_AUDIENCE: the API's
     #   Application ID URI (api://<id>) or client id the access token is issued for
     #   (comma-separated to accept more than one).
-    ENTRA_TENANT_ID = os.environ.get("ENTRA_TENANT_ID", "")
-    ENTRA_CLIENT_ID = os.environ.get("ENTRA_CLIENT_ID", "")
-    ENTRA_AUDIENCE = _as_list(os.environ.get("ENTRA_AUDIENCE", ""))
+    # Default to the built-in TEST Entra ID above so Microsoft sign-in works out of
+    # the box; a user's own env / .env / Control Panel values take precedence.
+    ENTRA_TENANT_ID = os.environ.get("ENTRA_TENANT_ID", "") or TEST_ENTRA_TENANT_ID
+    ENTRA_CLIENT_ID = os.environ.get("ENTRA_CLIENT_ID", "") or TEST_ENTRA_CLIENT_ID
+    ENTRA_AUDIENCE = _as_list(os.environ.get("ENTRA_AUDIENCE", "") or TEST_ENTRA_AUDIENCE)
     # The scope(s) the client requests for this API (e.g. api://<id>/access_as_user).
-    ENTRA_SCOPES = _as_list(os.environ.get("ENTRA_SCOPES", ""))
+    ENTRA_SCOPES = _as_list(os.environ.get("ENTRA_SCOPES", "") or TEST_ENTRA_SCOPES)
     # WHO is allowed (fail-closed: at least one of these must match, else denied).
     #   users  = object ids (oid) and/or emails / UPNs (case-insensitive)
     #   groups = Entra security-group object ids (needs the groups claim configured)
@@ -116,6 +131,10 @@ class DefaultConfig:
     ENTRA_ALLOWED_USERS = _as_list(os.environ.get("ENTRA_ALLOWED_USERS", ""))
     ENTRA_ALLOWED_GROUPS = _as_list(os.environ.get("ENTRA_ALLOWED_GROUPS", ""))
     ENTRA_ALLOWED_ROLES = _as_list(os.environ.get("ENTRA_ALLOWED_ROLES", ""))
+    # Email of the admin who owns the app registration. Imported from a share code
+    # so a colleague's "Request access" can address the approval email automatically.
+    # Defaults to the built-in test tenant's admin so the email is pre-addressed.
+    ENTRA_ADMIN_CONTACT = os.environ.get("ENTRA_ADMIN_CONTACT", "") or TEST_ENTRA_ADMIN_CONTACT
 
     # --- Dev Tunnel (public ingress, used by the orchestrated launcher.py) ---
     # When enabled, launcher.py starts a Microsoft Dev Tunnel once the server is
