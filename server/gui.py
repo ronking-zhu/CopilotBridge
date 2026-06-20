@@ -244,6 +244,23 @@ def show_connection_info(public_url, local_url, api_key, provider="copilot",
     else:
         ttk.Label(frm, text="Public URL is live — your phone can connect from anywhere.",
                   foreground="#0a7").pack(anchor="w", pady=(4, 10))
+        # The Dev Tunnel relay enforces a Microsoft sign-in before the request ever
+        # reaches the server. Tell the user what to expect on the phone.
+        try:
+            from config import DefaultConfig as _DC
+            _ta = (getattr(_DC, "TUNNEL_AUTH", "") or "").strip().lower()
+        except Exception:  # noqa: BLE001
+            _ta = ""
+        if _ta == "tenant":
+            ttk.Label(frm, text="Tunnel sign-in: opening the URL first asks for a Microsoft "
+                                "work account in your tenant — only members of your "
+                                "organization can reach the server.",
+                      foreground="#555", justify="left", wraplength=560).pack(anchor="w", pady=(0, 10))
+        elif _ta not in ("anonymous", ""):
+            ttk.Label(frm, text="Tunnel sign-in: opening the URL first asks for a Microsoft "
+                                "sign-in. Only the account hosting this tunnel can connect — "
+                                "sign in on your phone with that same Microsoft account.",
+                      foreground="#555", justify="left", wraplength=560).pack(anchor="w", pady=(0, 10))
 
     def row(label, value):
         value = value or ""
@@ -274,52 +291,9 @@ def show_connection_info(public_url, local_url, api_key, provider="copilot",
     status = ttk.Label(frm, text="", foreground="#0a7")
     status.pack(anchor="w", pady=(6, 0))
 
-    # --- Optional Microsoft Entra ID sign-in: configure WHO may use this server ---
-    # Loaded lazily so this window also works on a fresh install. The same dialogs
-    # are used by the Control Panel; both write straight to .env.
-    def _load_cfg():
-        import importlib
-        import config as _c
-        importlib.reload(_c)
-        return _c.DefaultConfig()
-    try:
-        _cfg0 = _load_cfg()
-    except Exception:  # noqa: BLE001
-        _cfg0 = None
-    sec = ttk.LabelFrame(frm, text="Microsoft sign-in (Entra ID)", padding=10)
-    sec.pack(fill="x", pady=(10, 0))
-    sec_status = ttk.Label(sec, text=(_identity_summary(_cfg0) if _cfg0 else ""),
-                           foreground="#555")
-    sec_status.pack(side="left")
-
-    def _on_id_saved(mode):
-        try:
-            sec_status.config(text=f"Mode: {mode} \u2014 saved; restart the server to apply")
-            status.config(text="Saved Microsoft sign-in settings. Restart the server to apply.")
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _on_users_saved(users):
-        try:
-            status.config(text=f"Saved allowed users ({len(users)}). Restart the server to apply.")
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _open_identity():
-        try:
-            _identity_dialog(root, _load_cfg(), on_saved=_on_id_saved)
-        except Exception as exc:  # noqa: BLE001
-            status.config(text=f"Couldn't open sign-in settings: {exc}")
-
-    def _open_users():
-        try:
-            _users_dialog(root, _load_cfg(), on_saved=_on_users_saved)
-        except Exception as exc:  # noqa: BLE001
-            status.config(text=f"Couldn't open user manager: {exc}")
-
-    secbtns = ttk.Frame(sec); secbtns.pack(side="right")
-    ttk.Button(secbtns, text="Manage users\u2026", command=_open_users).pack(side="right", padx=(6, 0))
-    ttk.Button(secbtns, text="Configure\u2026", command=_open_identity).pack(side="right")
+    # MS edition: user identity is enforced at the Dev Tunnel layer (Microsoft
+    # sign-in, owner-only). There is no app-layer Entra configuration here anymore;
+    # use the Control Panel's "Re-sign in" to switch/refresh the Microsoft account.
 
     bottom = ttk.Frame(frm); bottom.pack(side="bottom", fill="x", pady=(14, 0))
     ttk.Button(bottom, text="Close", command=root.destroy).pack(side="right")
@@ -447,7 +421,7 @@ def run_setup_wizard(cfg, tunnel, parent_title: str = "Copilot Bridge") -> str:
                     os.environ["DEVTUNNEL_PATH"] = str(dest)
                     try:
                         from devtunnel import DevTunnel
-                        tn["obj"] = DevTunnel(str(dest), cfg.TUNNEL_ID, cfg.PORT, cfg.TUNNEL_ANONYMOUS)
+                        tn["obj"] = DevTunnel(str(dest), cfg.TUNNEL_ID, cfg.PORT, cfg.TUNNEL_AUTH)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("constructing tunnel after install failed: %s", exc)
                 else:
@@ -579,8 +553,9 @@ def _identity_dialog(parent, cfg, on_saved=None) -> None:
     from tkinter import ttk, messagebox
 
     from provisioning import (build_access_request_mailto, detect_current_user,
-                              detect_entra_tenant, make_request_code, make_share_code,
-                              parse_share_code, read_connection_card, set_identity_config)
+                              detect_entra_tenant, get_allowed_users, make_request_code,
+                              make_share_code, parse_share_code, read_connection_card,
+                              set_identity_config)
 
     def _join(v):
         return ", ".join(v) if isinstance(v, (list, tuple)) else (v or "")
@@ -608,9 +583,11 @@ def _identity_dialog(parent, cfg, on_saved=None) -> None:
     # so nobody mistakes the pre-filled defaults for their own app registration.
     try:
         from config import (TEST_ENTRA_TENANT_ID, TEST_ENTRA_CLIENT_ID,
-                            TEST_ENTRA_ADMIN_CONTACT)
+                            TEST_ENTRA_ADMIN_CONTACT, entra_presets)
+        _presets = entra_presets()
     except Exception:  # noqa: BLE001
         TEST_ENTRA_TENANT_ID = TEST_ENTRA_CLIENT_ID = TEST_ENTRA_ADMIN_CONTACT = ""
+        _presets = []
     _cur_tid = (getattr(cfg, "ENTRA_TENANT_ID", "") or "").strip().lower()
     _cur_cid = (getattr(cfg, "ENTRA_CLIENT_ID", "") or "").strip().lower()
     if TEST_ENTRA_TENANT_ID and _cur_tid == TEST_ENTRA_TENANT_ID.lower() \
@@ -641,15 +618,66 @@ def _identity_dialog(parent, cfg, on_saved=None) -> None:
     def do_detect():
         tid, tname = detect_entra_tenant()
         if tid:
+            # The bundled TEST app only exists in the test tenant; detecting this
+            # PC's tenant would break sign-in (AADSTS500011). Warn before clobbering.
+            cur_client = e_client.get().strip().lower()
+            if (TEST_ENTRA_CLIENT_ID and cur_client == TEST_ENTRA_CLIENT_ID.lower()
+                    and tid.lower() != (TEST_ENTRA_TENANT_ID or "").lower()):
+                if not messagebox.askyesno(
+                        "Detect tenant",
+                        f"This PC\u2019s tenant ({tname or tid}) differs from the bundled "
+                        "TEST app\u2019s tenant. The built-in test sign-in only works with "
+                        f"tenant {TEST_ENTRA_TENANT_ID}; using this PC\u2019s tenant will "
+                        "fail with AADSTS500011 unless you also switch to your OWN "
+                        "Client ID.\n\nUse this PC\u2019s tenant anyway?", parent=win):
+                    return
             e_tenant.delete(0, "end")
             e_tenant.insert(0, tid)
-            msg.config(text=f"Detected this PC's tenant: {tname or tid}", foreground="#0a7")
+            msg.config(text=f"Detected this PC's tenant: {tname or tid}. Now set your own "
+                            "Client ID / Audience / Scopes.", foreground="#0a7")
         else:
             msg.config(text="Couldn't detect an Entra tenant on this PC "
                             "(is it Microsoft Entra joined?).", foreground="#c80")
 
-    ttk.Button(f, text="Detect", width=8, command=do_detect).grid(row=3, column=2, sticky="w", padx=6)
-    ttk.Label(f, text="Your Entra directory (tenant) GUID. Use Detect to read this device's tenant.",
+    def _apply_preset(preset):
+        """Drop a built-in sign-in preset (Outlook / Microsoft) into the fields."""
+        tid = (preset.get("tenant_id") or "").strip()
+        cid = (preset.get("client_id") or "").strip()
+        name = preset.get("name") or preset.get("label") or "preset"
+        if not tid and not cid:
+            messagebox.showinfo(
+                "Sign-in preset",
+                f"\u201c{name}\u201d isn\u2019t configured yet \u2014 its Tenant ID / "
+                "Client ID are reserved for a future build. For now pick another "
+                "preset, or choose \u201cDetect this PC\u2019s tenant\u201d and enter "
+                "your own Client ID / Audience / Scopes.", parent=win)
+            return
+        aud = (preset.get("audience") or (f"api://{cid}" if cid else "")).strip()
+        scopes = (preset.get("scopes") or (f"api://{cid}/access_as_user" if cid else "")).strip()
+        for entry, val in ((e_tenant, tid), (e_client, cid), (e_aud, aud), (e_scopes, scopes)):
+            entry.delete(0, "end")
+            entry.insert(0, val)
+        # A preset is meant to be used, so flip to Microsoft sign-in if still on apikey.
+        if mode_var.get().strip().lower() == "apikey":
+            mode_var.set("entra")
+        admin = (preset.get("admin_contact") or "").strip()
+        if admin:
+            _admin["contact"] = admin
+        msg.config(text=f"Loaded preset: {name}. Add yourself under \u201cAllow users\u201d, "
+                        "then Save.", foreground="#0a7")
+
+    # "Detect" is a dropdown: built-in presets (Outlook / Microsoft) + detect-this-PC.
+    detect_mb = ttk.Menubutton(f, text="Detect \u25be", width=10)
+    detect_menu = tk.Menu(detect_mb, tearoff=0)
+    detect_mb["menu"] = detect_menu
+    for _p in _presets:
+        detect_menu.add_command(label=_p.get("label") or _p.get("name") or "preset",
+                                command=lambda p=_p: _apply_preset(p))
+    if _presets:
+        detect_menu.add_separator()
+    detect_menu.add_command(label="Detect this PC\u2019s tenant\u2026", command=do_detect)
+    detect_mb.grid(row=3, column=2, sticky="w", padx=6)
+    ttk.Label(f, text="Pick a preset (Outlook / Microsoft) or Detect this device\u2019s tenant.",
               foreground="#888", font=("Segoe UI", 8), wraplength=540,
               justify="left").grid(row=4, column=1, columnspan=2, sticky="w")
 
@@ -668,7 +696,13 @@ def _identity_dialog(parent, cfg, on_saved=None) -> None:
                       "Access-token audience. Leave blank to use api://<client-id>.")
     e_scopes = field_row(9, "Scopes", _join(getattr(cfg, "ENTRA_SCOPES", "")),
                          "Scope the client requests. Blank = api://<client-id>/access_as_user.")
-    e_users = field_row(11, "Allow users", _join(getattr(cfg, "ENTRA_ALLOWED_USERS", "")),
+    # Read the allow-list fresh from .env (not the possibly-stale cfg snapshot) so
+    # this dialog never overwrites users just added via “Manage users”.
+    try:
+        _users_now = ", ".join(get_allowed_users())
+    except Exception:  # noqa: BLE001
+        _users_now = _join(getattr(cfg, "ENTRA_ALLOWED_USERS", ""))
+    e_users = field_row(11, "Allow users", _users_now,
                         "Emails / UPNs or object ids, comma-separated.")
     e_groups = field_row(13, "Allow groups", _join(getattr(cfg, "ENTRA_ALLOWED_GROUPS", "")),
                          "Security-group object ids, comma-separated.")
@@ -697,6 +731,18 @@ def _identity_dialog(parent, cfg, on_saved=None) -> None:
                 return
             if not aud and client:
                 aud = f"api://{client}"
+            # Guard the common foot-gun: bundled TEST Client ID + a non-test tenant
+            # can never work (the app only lives in the test tenant).
+            if (TEST_ENTRA_CLIENT_ID and client.lower() == TEST_ENTRA_CLIENT_ID.lower()
+                    and tenant.lower() != (TEST_ENTRA_TENANT_ID or "").lower()):
+                if not messagebox.askyesno(
+                        "Microsoft sign-in",
+                        "You\u2019re using the bundled TEST Client ID but a different "
+                        f"Tenant ID.\n\nThe test app only exists in tenant "
+                        f"{TEST_ENTRA_TENANT_ID}, so sign-in will fail with AADSTS500011. "
+                        "Set the Tenant ID to the test tenant (or use your own Client "
+                        "ID).\n\nSave anyway?", parent=win):
+                    return
             if not (users or groups or roles):
                 if not messagebox.askyesno(
                         "Microsoft sign-in",
@@ -1160,28 +1206,18 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     e_local = field("Local URL")
     e_key = field("API Key")
 
-    # ---- Identity / Microsoft sign-in ----
-    idrow = ttk.LabelFrame(frm, text="Identity / Microsoft sign-in", padding=12)
+    # ---- Microsoft account (Dev Tunnel sign-in) ----
+    # The Dev Tunnel relay enforces Microsoft sign-in (owner-only): only the account
+    # signed in here can reach this server from a phone. Re-sign-in to switch/refresh.
+    idrow = ttk.LabelFrame(frm, text="Microsoft account (Dev Tunnel sign-in)", padding=12)
     idrow.pack(fill="x", pady=(10, 0))
-    id_status = ttk.Label(idrow, text=_identity_summary(cfg), font=("Segoe UI", 10))
+    id_status = ttk.Label(idrow, text="checking\u2026", font=("Segoe UI", 10))
     id_status.pack(side="left")
-
-    def _on_identity_saved(mode):
-        id_status.config(text=f"Mode: {mode} \u00b7 saved \u2014 click Restart to apply")
-        set_status("Saved Microsoft sign-in settings. Click Restart to apply them.")
-
-    def _on_users_saved(users):
-        n = len(users)
-        who = "no users (server locked)" if n == 0 else (
-            f"{n} user" + ("s" if n != 1 else ""))
-        set_status(f"Saved allowed users: {who}. Click Restart to apply.")
-
-    ttk.Button(idrow, text="Configure\u2026",
-               command=lambda: _identity_dialog(root, cfg, on_saved=_on_identity_saved)
-               ).pack(side="right")
-    ttk.Button(idrow, text="Manage users\u2026",
-               command=lambda: _users_dialog(root, cfg, on_saved=_on_users_saved)
-               ).pack(side="right", padx=(0, 6))
+    relogin_btn = ttk.Button(
+        idrow, text="Re-sign in\u2026",
+        command=lambda: run_action(act_relogin,
+                                   "Opening a browser to sign in to Dev Tunnel\u2026"))
+    relogin_btn.pack(side="right")
 
     statusline = ttk.Label(frm, text="", foreground="#0a7", wraplength=600, justify="left")
     statusline.pack(anchor="w", pady=(10, 0))
@@ -1225,6 +1261,21 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
             ui_q.put(("status", st))
         threading.Thread(target=work, daemon=True).start()
 
+    def start_account_fetch():
+        # Show which Microsoft account currently gates/hosts the Dev Tunnel.
+        def work():
+            who = ""
+            try:
+                from devtunnel import DevTunnel, discover_devtunnel
+                exe = discover_devtunnel(getattr(cfg, "DEVTUNNEL_PATH", ""))
+                if exe:
+                    who = DevTunnel(exe, tunnel_id, getattr(cfg, "PORT", 3978),
+                                    getattr(cfg, "TUNNEL_AUTH", "private")).logged_in_user()
+            except Exception:  # noqa: BLE001
+                who = ""
+            ui_q.put(("account", who))
+        threading.Thread(target=work, daemon=True).start()
+
     def run_action(fn, msg):
         if state["busy"]:
             return
@@ -1254,6 +1305,10 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
                     state["busy"] = False
                     set_status(msg[2], err=not msg[1])
                     start_fetch()
+                elif msg[0] == "account":
+                    who = msg[1]
+                    id_status.config(text=(f"Signed in: {who}" if who
+                                           else "Not signed in \u2014 click Re-sign in"))
         except queue.Empty:
             pass
         state["ticks"] += 1
@@ -1329,6 +1384,25 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
         except Exception as exc:  # noqa: BLE001
             return False, f"Dev Tunnel {label} failed: {exc}"
 
+    def act_relogin():
+        # Switch/refresh the Microsoft account that gates + hosts the tunnel, then
+        # re-host so the public URL is owned by that account.
+        from devtunnel import DevTunnel, discover_devtunnel
+        exe = discover_devtunnel(getattr(cfg, "DEVTUNNEL_PATH", ""))
+        if not exe:
+            return False, "Dev Tunnel CLI not found on this PC."
+        t = DevTunnel(exe, tunnel_id, getattr(cfg, "PORT", 3978),
+                      getattr(cfg, "TUNNEL_AUTH", "private"))
+        who = t.relogin()  # logout + browser sign-in (blocks until done/timeout)
+        ui_q.put(("account", who))
+        if not who:
+            return False, "Dev Tunnel sign-in wasn't completed."
+        try:
+            http("POST", "/api/control/tunnel", body={"action": "restart"}, timeout=180)
+        except Exception:  # noqa: BLE001
+            pass
+        return True, f"Signed in to Dev Tunnel as {who}. Public URL re-hosted under this account."
+
     s_start.config(command=lambda: run_action(act_start_server, "Starting the server\u2026"))
     s_stop.config(command=lambda: run_action(act_stop_server, "Stopping the server\u2026"))
     s_restart.config(command=lambda: run_action(act_restart_server, "Restarting the server\u2026"))
@@ -1340,6 +1414,7 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
                                                 "Restarting the Dev Tunnel\u2026"))
 
     start_fetch()
+    start_account_fetch()
     root.after(160, pump)
     root.mainloop()
 

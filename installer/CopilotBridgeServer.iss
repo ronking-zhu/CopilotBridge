@@ -18,6 +18,9 @@
 #ifndef OutputDir
   #define OutputDir "..\dist"
 #endif
+#ifndef Edition
+  #define Edition ""
+#endif
 
 #define AppName "Copilot Bridge Server"
 #define AppPublisher "Copilot Bridge"
@@ -38,7 +41,11 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=admin
 ChangesEnvironment=yes
 OutputDir={#OutputDir}
+#if Edition != ""
+OutputBaseFilename=copilotbridgeserver-{#Edition}-{#AppVersion}-setup
+#else
 OutputBaseFilename=CopilotBridgeServer-{#AppVersion}-setup
+#endif
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

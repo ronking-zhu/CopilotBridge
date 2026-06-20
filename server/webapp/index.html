@@ -197,7 +197,7 @@
       <button id="cancelBtn" type="button">取消</button>
       <button id="saveBtn" type="button" class="primary">保存</button>
     </div>
-    <div class="hint">指令会在你的电脑上由 Copilot CLI 执行（默认限制在 workspace/ 沙箱）。Token 用于保护公网隧道，别外泄。</div>
+      <div class="hint">指令会在你的电脑上由 Copilot CLI 执行（默认限制在 workspace/ 沙箱）。打开本页前已经过了 Microsoft 登录（Dev Tunnel），Token 已自动填入，通常无需手动粘贴。</div>
   </div>
 </div>
 
@@ -209,7 +209,7 @@ const drawer = $('#drawer'), scrim = $('#scrim'), slist = $('#slist');
 const fileInput = $('#fileInput'), previews = $('#previews'), attachBtn = $('#attachBtn');
 
 let base  = (localStorage.getItem('cb_base')  || location.origin).replace(/\/$/,'');
-let token = localStorage.getItem('cb_token') || '';
+let token = localStorage.getItem('cb_token') || window.__CB_KEY || '';
 let sid   = localStorage.getItem('cb_sid') || '';
 let sessions = [];
 let copilotSessions = [];   // cache of the Copilot-CLI native list, for client-side search

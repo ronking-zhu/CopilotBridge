@@ -22,7 +22,8 @@
     .\scripts\build-installer.ps1 -Version 1.2.0 -SkipBuild
 #>
 param(
-    [string]$Version = "1.7.1",
+    [string]$Version = "2.0.1",
+    [string]$Edition = "ms",
     [switch]$SkipBuild
 )
 
@@ -61,11 +62,16 @@ Write-Host "[2/2] Compiling installer with $iscc ..." -ForegroundColor Cyan
 
 & $iscc `
     "/DAppVersion=$Version" `
+    "/DEdition=$Edition" `
     "/DSourceDir=$onedir" `
     "/DOutputDir=$(Join-Path $root 'dist')" `
     $iss
 
-$setup = Join-Path $root "dist\CopilotBridgeServer-$Version-setup.exe"
+if ($Edition) {
+    $setup = Join-Path $root "dist\copilotbridgeserver-$Edition-$Version-setup.exe"
+} else {
+    $setup = Join-Path $root "dist\CopilotBridgeServer-$Version-setup.exe"
+}
 if (Test-Path $setup) {
     $mb = [math]::Round((Get-Item $setup).Length / 1MB, 1)
     Write-Host "`nInstaller built: $setup ($mb MB)" -ForegroundColor Green

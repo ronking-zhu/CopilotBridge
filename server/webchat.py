@@ -34,6 +34,7 @@ import asyncio
 import base64
 import binascii
 import collections
+import json
 import os
 import re
 import time
@@ -462,6 +463,35 @@ def setup_web_routes(app: web.Application, config, runner):
             return web.FileResponse(path, headers=headers)
         return handler
 
+    async def _index(request: web.Request):  # noqa: ARG001
+        """Serve index.html with the host's API key injected.
+
+        In the MS edition the Dev Tunnel relay enforces a Microsoft sign-in
+        (owner-only) BEFORE any request reaches this server, so whoever loads this
+        page has already been authenticated by Microsoft. We therefore hand the
+        per-host API key to the page (``window.__CB_KEY``) so the web app works
+        immediately — no manual API-token entry. The key never leaves the
+        Microsoft-authenticated tunnel.
+        """
+        path = os.path.join(WEBAPP_DIR, "index.html")
+        if not os.path.isfile(path):
+            return web.Response(status=404, text="not found")
+        try:
+            html = open(path, encoding="utf-8").read()
+            key = config.CHAT_API_TOKEN or ""
+            # Only hand the key to the page when the tunnel itself enforces a
+            # Microsoft sign-in (private/tenant/org). In 'anonymous' mode the key is
+            # the only gate, so embedding it would defeat it — require manual entry.
+            tunnel_auth = (getattr(config, "TUNNEL_AUTH", "private") or "private").strip().lower()
+            if key and tunnel_auth != "anonymous":
+                inject = ("<script>window.__CB_KEY="
+                          + json.dumps(key) + ";</script>")
+                html = html.replace("</head>", inject + "</head>", 1)
+            return web.Response(text=html, content_type="text/html",
+                                charset="utf-8")
+        except OSError:
+            return web.FileResponse(path)
+
     # ----- Copilot CLI native sessions (read-only discovery + import) -----
 
     async def copilot_sessions_list(request: web.Request) -> web.Response:
@@ -549,9 +579,9 @@ def setup_web_routes(app: web.Application, config, runner):
     app.router.add_post("/api/copilot-sessions/{id}/import", copilot_session_import)
 
     # Web app (explicit files only - no directory listing)
-    app.router.add_get("/", _file("index.html"))
-    app.router.add_get("/app", _file("index.html"))
-    app.router.add_get("/index.html", _file("index.html"))
+    app.router.add_get("/", _index)
+    app.router.add_get("/app", _index)
+    app.router.add_get("/index.html", _index)
     app.router.add_get("/manifest.webmanifest", _file("manifest.webmanifest"))
     app.router.add_get("/sw.js", _file("sw.js", headers={"Service-Worker-Allowed": "/"}))
     app.router.add_get("/icon.svg", _file("icon.svg"))

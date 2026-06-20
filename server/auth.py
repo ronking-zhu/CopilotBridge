@@ -44,16 +44,83 @@ def _looks_like_jwt(token: str) -> bool:
     return token.count(".") == 2 and len(token) > 40
 
 
+def _read_env_allowlists(env_path):
+    """Read the three ``ENTRA_ALLOWED_*`` keys straight from a ``.env`` file.
+
+    Returns ``(users, groups, roles)`` as lists. Used to hot-reload the allow-list
+    in a running server when the Control Panel (a separate process) edits ``.env``,
+    so adding a user never requires a restart. Absent keys come back empty.
+    """
+    users, groups, roles = [], [], []
+    try:
+        from pathlib import Path
+        p = Path(env_path)
+        if not p.is_file():
+            return users, groups, roles
+        keymap = {
+            "ENTRA_ALLOWED_USERS": "users",
+            "ENTRA_ALLOWED_GROUPS": "groups",
+            "ENTRA_ALLOWED_ROLES": "roles",
+        }
+        bucket = {"users": [], "groups": [], "roles": []}
+        for line in p.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            k = k.strip()
+            if k in keymap:
+                bucket[keymap[k]] = [x.strip() for x in v.split(",") if x.strip()]
+        return bucket["users"], bucket["groups"], bucket["roles"]
+    except OSError:
+        return users, groups, roles
+
+
 class _EntraValidator:
     """Validates Microsoft Entra ID access tokens for this API."""
 
-    def __init__(self, tenant_id, audiences, allowed_users, allowed_groups, allowed_roles):
+    def __init__(self, tenant_id, audiences, allowed_users, allowed_groups, allowed_roles,
+                 env_path=None):
         self.tenant_id = (tenant_id or "").strip()
         self.audiences = [a for a in (audiences or []) if a]
         self.allowed_users = {u.strip().lower() for u in (allowed_users or []) if u.strip()}
         self.allowed_groups = {g.strip() for g in (allowed_groups or []) if g.strip()}
         self.allowed_roles = {r.strip() for r in (allowed_roles or []) if r.strip()}
         self._jwks_client = None
+        # Hot-reload the allow-list from .env (edited by the Control Panel, a
+        # separate process) keyed on file mtime, so adding a user takes effect
+        # without restarting the server. Record the current mtime so we only
+        # reload after a real change.
+        self._env_path = env_path
+        self._allow_mtime = None
+        try:
+            import os
+            if env_path and os.path.isfile(env_path):
+                self._allow_mtime = os.path.getmtime(env_path)
+        except OSError:
+            pass
+
+    def _maybe_reload_allowlist(self) -> None:
+        """Re-read ``ENTRA_ALLOWED_*`` from ``.env`` when the file changed."""
+        if not self._env_path:
+            return
+        try:
+            import os
+            if not os.path.isfile(self._env_path):
+                return
+            mtime = os.path.getmtime(self._env_path)
+        except OSError:
+            return
+        if mtime == self._allow_mtime:
+            return
+        self._allow_mtime = mtime
+        users, groups, roles = _read_env_allowlists(self._env_path)
+        self.allowed_users = {u.strip().lower() for u in users if u.strip()}
+        self.allowed_groups = {g.strip() for g in groups if g.strip()}
+        self.allowed_roles = {r.strip() for r in roles if r.strip()}
+        logger.info("Reloaded Entra allow-list from .env: %d user(s), %d group(s), "
+                    "%d role(s).", len(self.allowed_users), len(self.allowed_groups),
+                    len(self.allowed_roles))
 
     @property
     def enabled(self) -> bool:
@@ -84,6 +151,8 @@ class _EntraValidator:
         """Return ``(ok, identity, error)`` for an Entra access token."""
         import jwt
 
+        # Pick up allow-list edits (Manage users) without a server restart.
+        self._maybe_reload_allowlist()
         try:
             key = self._signing_key(token)
         except Exception as exc:  # noqa: BLE001 - network / key issues are non-fatal
@@ -160,12 +229,17 @@ class Authenticator:
         self.api_token = getattr(config, "CHAT_API_TOKEN", "") or ""
         self.entra_client_id = getattr(config, "ENTRA_CLIENT_ID", "") or ""
         self.entra_scopes = list(getattr(config, "ENTRA_SCOPES", []) or [])
+        try:
+            from provisioning import DEFAULT_ENV_PATH as _env_path
+        except Exception:  # noqa: BLE001
+            _env_path = None
         self.entra = _EntraValidator(
             getattr(config, "ENTRA_TENANT_ID", ""),
             getattr(config, "ENTRA_AUDIENCE", []),
             getattr(config, "ENTRA_ALLOWED_USERS", []),
             getattr(config, "ENTRA_ALLOWED_GROUPS", []),
             getattr(config, "ENTRA_ALLOWED_ROLES", []),
+            env_path=_env_path,
         )
         if self.mode in ("entra", "both") and not self.entra.enabled:
             logger.error("AUTH_MODE=%s but ENTRA_TENANT_ID/ENTRA_AUDIENCE are not set; "

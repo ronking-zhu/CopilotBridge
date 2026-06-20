@@ -206,7 +206,7 @@ async def run(info_q=None) -> None:
     tunnel: DevTunnel | None = None
     public_url: str | None = None
     if CONFIG.TUNNEL_ENABLED and tunnel_exe:
-        candidate = DevTunnel(tunnel_exe, CONFIG.TUNNEL_ID, port, CONFIG.TUNNEL_ANONYMOUS)
+        candidate = DevTunnel(tunnel_exe, CONFIG.TUNNEL_ID, port, CONFIG.TUNNEL_AUTH)
         controller.tunnel = candidate  # let the Control Panel act on it immediately
         # In GUI mode the wizard already handled sign-in on the main thread, so we
         # must NOT call tkinter here (we're on a worker thread). In console/headless
@@ -235,6 +235,9 @@ async def run(info_q=None) -> None:
             tunnel = candidate
             if public_url:
                 _stage(6, f"Dev Tunnel is live: {public_url}")
+                if getattr(candidate, "access_human", ""):
+                    log.info("[startup 6/%d] Tunnel access control: %s",
+                             _TOTAL_STAGES, candidate.access_human)
             else:
                 log.warning("[startup 6/%d] Dev Tunnel did not come up after retries; "
                             "serving LAN-only. The watchdog will keep retrying; you can "
@@ -382,7 +385,7 @@ def _run_gui() -> None:
         try:
             exe = discover_devtunnel(cfg.DEVTUNNEL_PATH)
             if exe:
-                tunnel = DevTunnel(exe, cfg.TUNNEL_ID, cfg.PORT, cfg.TUNNEL_ANONYMOUS)
+                tunnel = DevTunnel(exe, cfg.TUNNEL_ID, cfg.PORT, cfg.TUNNEL_AUTH)
         except Exception as exc:  # noqa: BLE001
             log.debug("tunnel discovery failed: %s", exc)
 

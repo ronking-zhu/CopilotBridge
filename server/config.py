@@ -42,6 +42,50 @@ TEST_ENTRA_SCOPES = f"api://{TEST_ENTRA_CLIENT_ID}/access_as_user"
 TEST_ENTRA_ADMIN_CONTACT = "zhurongqing@outlook.com"
 
 
+# --- Reserved Microsoft Entra ID (to be filled when available) ---------------
+# Placeholder slots for an official Microsoft (corp) tenant + app registration.
+# Empty for now; the Control Panel's "Detect" dropdown offers it as a choice that
+# shows "not configured yet" until these are populated (here or via env). When you
+# have the real GUIDs, set them and Microsoft sign-in is one click away.
+MS_ENTRA_TENANT_ID = os.environ.get("MS_ENTRA_TENANT_ID", "")
+MS_ENTRA_CLIENT_ID = os.environ.get("MS_ENTRA_CLIENT_ID", "")
+MS_ENTRA_AUDIENCE = os.environ.get("MS_ENTRA_AUDIENCE", "")
+MS_ENTRA_SCOPES = os.environ.get("MS_ENTRA_SCOPES", "")
+MS_ENTRA_ADMIN_CONTACT = os.environ.get("MS_ENTRA_ADMIN_CONTACT", "")
+
+
+def entra_presets():
+    """Built-in sign-in presets offered by the Control Panel's "Detect" dropdown.
+
+    Each is a dict with ``key``/``name``/``label`` plus the **non-secret**
+    tenant/client/audience/scopes to drop into the Microsoft sign-in dialog. A
+    preset whose ``tenant_id``/``client_id`` are empty is a reserved slot shown as
+    "not configured yet" (e.g. Microsoft until its GUIDs are known).
+    """
+    return [
+        {
+            "key": "outlook",
+            "name": "Outlook (zhurongqing@outlook.com)",
+            "label": "Outlook \u2014 zhurongqing@outlook.com (test)",
+            "tenant_id": TEST_ENTRA_TENANT_ID,
+            "client_id": TEST_ENTRA_CLIENT_ID,
+            "audience": TEST_ENTRA_AUDIENCE,
+            "scopes": TEST_ENTRA_SCOPES,
+            "admin_contact": TEST_ENTRA_ADMIN_CONTACT,
+        },
+        {
+            "key": "microsoft",
+            "name": "Microsoft",
+            "label": "Microsoft \u2014 (not configured yet)",
+            "tenant_id": MS_ENTRA_TENANT_ID,
+            "client_id": MS_ENTRA_CLIENT_ID,
+            "audience": MS_ENTRA_AUDIENCE,
+            "scopes": MS_ENTRA_SCOPES,
+            "admin_contact": MS_ENTRA_ADMIN_CONTACT,
+        },
+    ]
+
+
 class DefaultConfig:
     """Bridge configuration."""
 
@@ -108,10 +152,11 @@ class DefaultConfig:
     CHAT_API_TOKEN = os.environ.get("CHAT_API_TOKEN", "")
 
     # --- Identity / auth policy for the direct chat + control API ---
-    # 'apikey' (default) keeps the legacy shared CHAT_API_TOKEN. 'entra' requires a
-    # Microsoft Entra ID (Azure AD) signed-in user (no shared key). 'both' accepts
-    # either, for a safe migration. Default 'apikey' => existing installs unchanged.
-    AUTH_MODE = (os.environ.get("AUTH_MODE", "apikey") or "apikey").strip().lower()
+    # MS edition: user identity is enforced at the Dev Tunnel layer (Microsoft
+    # Entra sign-in, owner-only). The app layer keeps only the per-host API key, so
+    # AUTH_MODE is pinned to 'apikey' -- there is no app-layer Entra config in this
+    # build (no manual tenant/client/allow-list to manage).
+    AUTH_MODE = "apikey"
     # Entra ID app registration the clients sign in against + this server validates.
     # ENTRA_TENANT_ID: your tenant GUID (single-tenant, recommended) or
     #   'organizations'/'common' for multi-tenant. ENTRA_AUDIENCE: the API's
@@ -141,6 +186,12 @@ class DefaultConfig:
     # healthy, exposing a public HTTPS URL that forwards to the local port.
     TUNNEL_ENABLED = _as_bool(os.environ.get("TUNNEL_ENABLED"), True)
     TUNNEL_ID = os.environ.get("TUNNEL_ID", "copilot-bridge")
-    TUNNEL_ANONYMOUS = _as_bool(os.environ.get("TUNNEL_ANONYMOUS"), True)
+    # Tunnel-LAYER access control (who may even reach the relay). MS edition default
+    # is 'private' = Microsoft Entra, OWNER-ONLY: only the account that signed into
+    # Dev Tunnel on this host can connect (most secure; no per-user config needed).
+    # Override with TUNNEL_AUTH=tenant (whole Entra tenant) | anonymous | org:<name>.
+    TUNNEL_AUTH = (os.environ.get("TUNNEL_AUTH", "") or "private").strip().lower()
+    # Retained for any legacy reader; derived from TUNNEL_AUTH now.
+    TUNNEL_ANONYMOUS = (TUNNEL_AUTH == "anonymous")
     # Empty DEVTUNNEL_PATH => auto-discover (bundled tools/ -> PATH -> winget link).
     DEVTUNNEL_PATH = os.environ.get("DEVTUNNEL_PATH", "")

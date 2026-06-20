@@ -75,16 +75,32 @@ def discover_devtunnel(explicit: str = "") -> Optional[str]:
 class DevTunnel:
     """Manage one named Dev Tunnel that fronts the local app server port."""
 
-    def __init__(self, exe: str, tunnel_id: str, port: int, anonymous: bool = True):
+    def __init__(self, exe: str, tunnel_id: str, port: int, tunnel_auth: str = "private"):
         self.exe = exe
         self.tunnel_id = tunnel_id
         self.port = port
-        self.anonymous = anonymous
+        # Tunnel-layer access control: 'private' (owner-only Entra), 'tenant'
+        # (whole Entra tenant), 'anonymous', or 'org:<name>' (GitHub). Accept a
+        # legacy bool for back-compat (True => anonymous, False => private).
+        if isinstance(tunnel_auth, bool):
+            tunnel_auth = "anonymous" if tunnel_auth else "private"
+        self.tunnel_auth = (tunnel_auth or "private").strip().lower()
+        self.anonymous = (self.tunnel_auth == "anonymous")
+        # Effective access as last applied/read back (for the UI + connection card).
+        self.access_code: str = ""
+        self.access_human: str = ""
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._drain_task: Optional[asyncio.Task] = None
         # Last few lines the devtunnel CLI printed on a failed host attempt, kept so
         # the Control Panel / logs can show the *real* reason it wouldn't start.
         self.last_error: str = ""
+
+    @property
+    def _org_name(self) -> str:
+        """For 'org:<name>' auth, the GitHub org; '' otherwise."""
+        if self.tunnel_auth.startswith("org:"):
+            return self.tunnel_auth.split(":", 1)[1].strip()
+        return ""
 
     # -- sync helpers (quick CLI calls) ----------------------------------
 
@@ -140,6 +156,24 @@ class DevTunnel:
             return False
         return self.is_logged_in()
 
+    def relogin(self, timeout: int = 300) -> str:
+        """Force a fresh Microsoft sign-in: log out, then browser login.
+
+        Used by the Control Panel's "Re-sign in" button so the user can switch or
+        refresh the Microsoft account that gates (and hosts) the tunnel. Blocks until
+        the browser sign-in completes or times out. Returns the now signed-in
+        user (email/UPN), or '' if it didn't complete.
+        """
+        try:
+            self._run("user", "logout", timeout=30)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("devtunnel user logout failed: %s", exc)
+        try:
+            self._run("user", "login", timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("devtunnel user login failed: %s", exc)
+        return self.logged_in_user()
+
     def logged_in_user(self) -> str:
         """Best-effort signed-in identity (email/username), or '' if unknown."""
         try:
@@ -147,35 +181,101 @@ class DevTunnel:
         except Exception:  # noqa: BLE001
             return ""
         out = (result.stdout or "") + (result.stderr or "")
+        # Prefer the token that looks like an email/UPN (e.g. "Logged in as
+        # roz@microsoft.com using Microsoft." -> roz@microsoft.com).
         for line in out.splitlines():
-            s = line.strip()
-            if "@" in s:
-                return s.split()[-1] if " " in s else s
+            for tok in line.replace(",", " ").split():
+                t = tok.strip().strip(".")
+                if "@" in t and "." in t.split("@")[-1]:
+                    return t
         return ""
 
+    def access_summary(self) -> tuple[str, str]:
+        """Return ``(code, human)`` describing the tunnel's effective access control.
+
+        ``code`` is one of ``'tenant' | 'anonymous' | 'org' | 'private' | 'unknown'``;
+        ``human`` is a short phrase for logs / UI. Read back from ``access list`` so it
+        reflects what actually stuck (not just what we asked for).
+        """
+        try:
+            r = self._run("access", "list", self.tunnel_id)
+        except Exception:  # noqa: BLE001
+            return "unknown", "unknown"
+        out = (r.stdout or "") + (r.stderr or "")
+        low = out.lower()
+        if "tenant" in low:
+            m = re.search(r"\(([0-9a-fA-F-]{36})\)", out)
+            tid = m.group(1) if m else ""
+            return "tenant", "Microsoft Entra tenant" + (f" {tid}" if tid else "")
+        if "anonymous" in low:
+            return "anonymous", "anyone with the URL (anonymous)"
+        if "org" in low or "organization" in low:
+            return "org", "GitHub organization members"
+        return "private", "only the signed-in host account (Microsoft)"
+
+    def _apply_access(self) -> str:
+        """Set the tunnel's access-control entry to match ``self.tunnel_auth``.
+
+        Idempotent: clears any stale entries first (so switching away from a prior
+        ``--allow-anonymous`` run actually takes effect), then adds the single entry
+        for the current mode. The tunnel owner always keeps access regardless. Refreshes
+        ``self.access_code`` / ``self.access_human`` and returns combined CLI output.
+        """
+        out: list[str] = []
+        try:
+            r0 = self._run("access", "reset", self.tunnel_id)
+            out.append((r0.stdout or "") + (r0.stderr or ""))
+            if self.tunnel_auth == "anonymous":
+                r = self._run("access", "create", self.tunnel_id, "--anonymous")
+            elif self._org_name:
+                r = self._run("access", "create", self.tunnel_id, "--org", self._org_name)
+            elif self.tunnel_auth == "tenant":
+                r = self._run("access", "create", self.tunnel_id, "--tenant")
+            else:
+                # 'private' (default): owner-only. The reset above already cleared
+                # any anonymous/tenant entries, leaving just the host account, which
+                # still requires a Microsoft sign-in at the relay to connect.
+                r = None
+            if r is not None:
+                out.append((r.stdout or "") + (r.stderr or ""))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("devtunnel access setup (%s) failed: %s", self.tunnel_auth, exc)
+        # Read back what actually stuck so callers can show/log the truth.
+        self.access_code, self.access_human = self.access_summary()
+        if self.tunnel_auth == "tenant" and self.access_code != "tenant":
+            logger.error(
+                "Tunnel auth 'tenant' did not apply (effective: %s). The devtunnel host "
+                "is likely signed in with a PERSONAL Microsoft account; run "
+                "`devtunnel user login` with a WORK/SCHOOL account for Entra-gated access.",
+                self.access_human)
+        else:
+            logger.info("Tunnel access control: %s", self.access_human)
+        return "\n".join(s for s in out if s).strip()
+
     def ensure(self, retries: int = 3) -> bool:
-        """Create the tunnel and its http port mapping, retrying transient failures.
+        """Create the tunnel + its http port mapping and apply access control.
 
         ``create`` returning "already exists" is success; a genuine failure
-        (network / control-plane hiccup) is retried with a short backoff. Returns
-        True once the tunnel is confirmed present (best-effort via ``show``); the
-        definitive success signal is :meth:`host` actually getting a public URL.
+        (network / control-plane hiccup) is retried with a short backoff. The tunnel
+        is always created *private*, then :meth:`_apply_access` sets the one
+        access-control entry for the configured mode (Entra tenant / anonymous /
+        GitHub org). Returns True once the tunnel is confirmed present.
         """
         import time
 
         last = ""
         for attempt in range(1, retries + 1):
-            create_args = ["create", self.tunnel_id]
-            if self.anonymous:
-                create_args.append("--allow-anonymous")
             try:
-                r1 = self._run(*create_args)  # already-exists is fine
-                # Port must be http (see module docstring). Re-creating an existing
-                # mapping is a harmless no-op.
+                # Always create private; the access-control entry below decides who
+                # may connect. (Re-creating an existing tunnel/port is a no-op.)
+                r1 = self._run("create", self.tunnel_id)  # already-exists is fine
+                # Port must be http (see module docstring).
                 r2 = self._run("port", "create", self.tunnel_id, "-p", str(self.port),
                                "--protocol", "http")
+                r3 = self._apply_access()
                 last = ((r1.stdout or "") + (r1.stderr or "")
-                        + (r2.stdout or "") + (r2.stderr or "")).strip()
+                        + (r2.stdout or "") + (r2.stderr or "")
+                        + ("\n" + r3 if r3 else "")).strip()
             except Exception as exc:  # noqa: BLE001
                 last = str(exc)
                 logger.warning("devtunnel ensure attempt %d/%d errored: %s",
