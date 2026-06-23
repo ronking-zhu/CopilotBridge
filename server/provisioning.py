@@ -235,6 +235,21 @@ def set_identity_config(env_path: Path | str = DEFAULT_ENV_PATH, **fields) -> di
     return written
 
 
+def set_port(port, env_path: Path | str = DEFAULT_ENV_PATH) -> int:
+    """Persist the server listen ``PORT`` to ``.env`` (and ``os.environ``).
+
+    Used by the Control Panel's "change port" action. Validates the range and
+    returns the normalized int. The next server start reads this value; the tunnel
+    forwards the same port.
+    """
+    p = int(str(port).strip())
+    if p < 1 or p > 65535:
+        raise ValueError("port must be between 1 and 65535")
+    _upsert_env_line(Path(env_path), "PORT", str(p))
+    os.environ["PORT"] = str(p)
+    return p
+
+
 def get_allowed_users(env_path: Path | str = DEFAULT_ENV_PATH) -> list[str]:
     """Return the current ``ENTRA_ALLOWED_USERS`` allow-list read fresh from ``.env``.
 

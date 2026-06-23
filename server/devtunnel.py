@@ -174,6 +174,18 @@ class DevTunnel:
             logger.warning("devtunnel user login failed: %s", exc)
         return self.logged_in_user()
 
+    def delete_port(self, port) -> None:
+        """Remove a (stale) port mapping from this tunnel — best-effort.
+
+        Used by the Control Panel after a port change so the tunnel stops
+        advertising the OLD ``-<port>`` web-forwarding URL. Deleting a port that
+        doesn't exist is a harmless no-op.
+        """
+        try:
+            self._run("port", "delete", self.tunnel_id, "-p", str(int(port)))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("devtunnel port delete %s failed: %s", port, exc)
+
     def logged_in_user(self) -> str:
         """Best-effort signed-in identity (email/username), or '' if unknown."""
         try:

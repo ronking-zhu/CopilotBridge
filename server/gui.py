@@ -285,7 +285,6 @@ def show_connection_info(public_url, local_url, api_key, provider="copilot",
     if not lan_only:
         row("Server URL", public_url)
     row("Local URL", local_url)
-    row("API Key", api_key)
     row("AI Provider", provider)
 
     status = ttk.Label(frm, text="", foreground="#0a7")
@@ -500,6 +499,21 @@ def _default_provider_name(cfg) -> str:
 
 
 _CREATE_NO_WINDOW = 0x08000000
+
+
+def _port_listening(port, host: str = "127.0.0.1") -> bool:
+    """True if something is accepting TCP connections on ``host:port`` right now.
+
+    Used to confirm the old listen port is fully released after a port change
+    before we restart on the new one.
+    """
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            return s.connect_ex((host, int(port))) == 0
+    except OSError:
+        return False
 
 
 def _force_kill_server(tunnel_id: str = "copilot-bridge") -> bool:
@@ -1092,14 +1106,32 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     key = getattr(cfg, "CHAT_API_TOKEN", "")
     tunnel_id = getattr(cfg, "TUNNEL_ID", "copilot-bridge")
     tunnel_enabled = bool(getattr(cfg, "TUNNEL_ENABLED", True))
+    _host = getattr(cfg, "HOST", "localhost")
     # Probe 127.0.0.1 rather than "localhost": when the server is stopped this
     # refuses instantly instead of waiting on the IPv6 (::1) attempt first.
-    _phost = "127.0.0.1" if getattr(cfg, "HOST", "localhost") in ("localhost", "") else cfg.HOST
-    probe_base = f"http://{_phost}:{getattr(cfg, 'PORT', 3978)}"
+    _phost = "127.0.0.1" if _host in ("localhost", "") else _host
+    # The listen port can change at runtime (Port -> Change & restart), so keep it
+    # in a mutable holder that http()/render and the port action all read live.
+    net = {"port": int(getattr(cfg, "PORT", 3978))}
+
+    def _local_url():
+        return f"http://{_host}:{net['port']}"
+
+    def _probe_base():
+        return f"http://{_phost}:{net['port']}"
+
+    def _health_on(port) -> bool:
+        """True if a Copilot Bridge /health answers on this port (vs. a stranger)."""
+        try:
+            with urllib.request.urlopen(f"http://{_phost}:{int(port)}/health", timeout=1.0) as r:
+                json.loads(r.read().decode("utf-8", "replace"))
+                return True
+        except Exception:  # noqa: BLE001
+            return False
 
     def http(method, path, body=None, timeout=5):
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(probe_base + path, data=data, method=method)
+        req = urllib.request.Request(_probe_base() + path, data=data, method=method)
         if key:
             req.add_header("X-API-Key", key)
         if data is not None:
@@ -1204,7 +1236,19 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
 
     e_public = field("Server URL")
     e_local = field("Local URL")
-    e_key = field("API Key")
+
+    # ---- Port (server listen + Dev Tunnel forward) ----
+    prow = ttk.LabelFrame(frm, text="Port (server listen + Dev Tunnel forward)", padding=12)
+    prow.pack(fill="x", pady=(10, 0))
+    ttk.Label(prow, text="Port:").pack(side="left")
+    port_var = tk.StringVar(value=str(net["port"]))
+    port_entry = ttk.Entry(prow, textvariable=port_var, width=8)
+    port_entry.pack(side="left", padx=(8, 0))
+    port_btn = ttk.Button(prow, text="Change & restart")
+    port_btn.pack(side="right")
+    ttk.Label(prow, text="Stops the server, frees the old port, restarts on the new one.",
+              foreground="#888", font=("Segoe UI", 8), wraplength=330,
+              justify="left").pack(side="left", padx=(12, 0))
 
     # ---- Microsoft account (Dev Tunnel sign-in) ----
     # The Dev Tunnel relay enforces Microsoft sign-in (owner-only): only the account
@@ -1240,8 +1284,7 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
                         foreground=("#0a7" if tstate == "running"
                                     else ("#c80" if tstate == "paused" else "#999")))
         set_entry(e_public, st.get("publicUrl") or (st.get("localUrl") if server_up else ""))
-        set_entry(e_local, st.get("localUrl") or base)
-        set_entry(e_key, key)
+        set_entry(e_local, st.get("localUrl") or _local_url())
         b = state["busy"]
         s_start.config(state="disabled" if (server_up or b) else "normal")
         s_stop.config(state="normal" if (server_up and not b) else "disabled")
@@ -1250,6 +1293,7 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
         t_start.config(state="normal" if (tun_ok and tstate in ("paused", "down") and not b) else "disabled")
         t_stop.config(state="normal" if (tun_ok and tstate == "running" and not b) else "disabled")
         t_restart.config(state="normal" if (tun_ok and tstate in ("running", "down") and not b) else "disabled")
+        port_btn.config(state="disabled" if b else "normal")
 
     def start_fetch():
         if state["fetching"]:
@@ -1269,7 +1313,7 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
                 from devtunnel import DevTunnel, discover_devtunnel
                 exe = discover_devtunnel(getattr(cfg, "DEVTUNNEL_PATH", ""))
                 if exe:
-                    who = DevTunnel(exe, tunnel_id, getattr(cfg, "PORT", 3978),
+                    who = DevTunnel(exe, tunnel_id, net["port"],
                                     getattr(cfg, "TUNNEL_AUTH", "private")).logged_in_user()
             except Exception:  # noqa: BLE001
                 who = ""
@@ -1281,7 +1325,7 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
             return
         state["busy"] = True
         set_status(msg)
-        for btn in (s_start, s_stop, s_restart, t_start, t_stop, t_restart):
+        for btn in (s_start, s_stop, s_restart, t_start, t_stop, t_restart, port_btn):
             btn.config(state="disabled")
 
         def work():
@@ -1391,7 +1435,7 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
         exe = discover_devtunnel(getattr(cfg, "DEVTUNNEL_PATH", ""))
         if not exe:
             return False, "Dev Tunnel CLI not found on this PC."
-        t = DevTunnel(exe, tunnel_id, getattr(cfg, "PORT", 3978),
+        t = DevTunnel(exe, tunnel_id, net["port"],
                       getattr(cfg, "TUNNEL_AUTH", "private"))
         who = t.relogin()  # logout + browser sign-in (blocks until done/timeout)
         ui_q.put(("account", who))
@@ -1403,6 +1447,69 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
             pass
         return True, f"Signed in to Dev Tunnel as {who}. Public URL re-hosted under this account."
 
+    def act_change_port(raw):
+        """Change the listen+forward port: stop, FULLY free the old port, restart."""
+        try:
+            new_port = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return False, "Enter a numeric port (1024\u201365535)."
+        if new_port < 1024 or new_port > 65535:
+            return False, "Port must be between 1024 and 65535."
+        old_port = net["port"]
+        if new_port == old_port:
+            return False, f"Port is already {old_port}."
+        # Refuse if some OTHER program already holds the target port.
+        if _port_listening(new_port) and not _health_on(new_port):
+            return False, f"Port {new_port} is already in use by another program."
+        # 1) persist the new port so the next server start binds it.
+        try:
+            from provisioning import set_port
+            set_port(new_port)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Couldn't save the new port: {exc}"
+        # 2) graceful shutdown of the current server (also stops its tunnel).
+        try:
+            http("POST", "/api/control/shutdown", body={}, timeout=5)
+        except Exception:  # noqa: BLE001
+            pass
+        # 3) wait for it to stop; then force-kill any residue + our tunnel host.
+        for _ in range(20):  # ~8s
+            time.sleep(0.4)
+            if not _port_listening(old_port):
+                break
+        _force_kill_server(tunnel_id)
+        # 4) drop the OLD Dev Tunnel port mapping (cloud-side cleanup).
+        try:
+            from devtunnel import DevTunnel, discover_devtunnel
+            exe = discover_devtunnel(getattr(cfg, "DEVTUNNEL_PATH", ""))
+            if exe:
+                DevTunnel(exe, tunnel_id, new_port,
+                          getattr(cfg, "TUNNEL_AUTH", "private")).delete_port(old_port)
+        except Exception:  # noqa: BLE001
+            pass
+        # 5) WAIT until the old local port is fully released.
+        freed = False
+        for _ in range(30):  # ~12s
+            if not _port_listening(old_port):
+                freed = True
+                break
+            time.sleep(0.4)
+        if not freed:
+            return False, (f"Port {old_port} is still held by a process. End "
+                           "CopilotBridgeServer.exe in Task Manager, then Start.")
+        # 6) switch the panel to the new port and relaunch the server.
+        net["port"] = new_port
+        try:
+            spawn_server()
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Saved port {new_port}, but couldn't start the server: {exc}"
+        # 7) wait for the server to answer on the NEW port.
+        for _ in range(60):  # ~30s cold start
+            time.sleep(0.5)
+            if fetch_status().get("server") == "running":
+                return True, f"Port changed to {new_port}. Server + Dev Tunnel restarted."
+        return True, f"Port changed to {new_port}. Server is starting\u2026"
+
     s_start.config(command=lambda: run_action(act_start_server, "Starting the server\u2026"))
     s_stop.config(command=lambda: run_action(act_stop_server, "Stopping the server\u2026"))
     s_restart.config(command=lambda: run_action(act_restart_server, "Restarting the server\u2026"))
@@ -1412,6 +1519,9 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
                                              "Stopping the Dev Tunnel\u2026"))
     t_restart.config(command=lambda: run_action(lambda: tunnel_action("restart", "restarted"),
                                                 "Restarting the Dev Tunnel\u2026"))
+    port_btn.config(command=lambda: run_action(
+        lambda: act_change_port(port_var.get()),
+        "Changing the port (stopping, freeing, restarting)\u2026"))
 
     start_fetch()
     start_account_fetch()
