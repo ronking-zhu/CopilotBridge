@@ -12,7 +12,7 @@
     The resulting installer puts CopilotBridgeServer.exe + its runtime +
     devtunnel.exe into Program Files, adds the install folder to the system PATH,
     creates Start-menu/desktop shortcuts, and can launch the server (which shows
-    the Dev Tunnel sign-in dialog) right after install.
+    the Dev Tunnel sign-in dialog and browser notification/OneDrive setup) right after install.
 
 .PARAMETER Version
     Product version embedded in the installer + output filename (default 1.5.0).
@@ -22,7 +22,7 @@
     .\scripts\build-installer.ps1 -Version 1.2.0 -SkipBuild
 #>
 param(
-    [string]$Version = "2.1.0",
+    [string]$Version = "2.2.3",
     [string]$Edition = "ms",
     [switch]$SkipBuild
 )
@@ -76,7 +76,7 @@ if (Test-Path $setup) {
     $mb = [math]::Round((Get-Item $setup).Length / 1MB, 1)
     Write-Host "`nInstaller built: $setup ($mb MB)" -ForegroundColor Green
     Write-Host "Ship this single file. It installs to Program Files, sets PATH, and" -ForegroundColor Green
-    Write-Host "launches the server (Dev Tunnel sign-in dialog) after install." -ForegroundColor Green
+    Write-Host "launches the server and notification/OneDrive setup after install." -ForegroundColor Green
 }
 else {
     throw "ISCC finished but $setup was not produced. Check the output above."

@@ -83,6 +83,22 @@ def _is_addr_in_use(exc: BaseException) -> bool:
             or "10048" in str(exc))
 
 
+def _open_notification_setup(local_url: str) -> bool:
+    """Open the first-run notification opt-in page in the default browser."""
+    import webbrowser
+    from urllib.parse import urlsplit, urlunsplit
+
+    parsed = urlsplit(local_url)
+    if parsed.hostname in {"0.0.0.0", "::"}:
+        netloc = f"localhost:{parsed.port}" if parsed.port else "localhost"
+        parsed = parsed._replace(netloc=netloc)
+    url = (
+        f"{urlunsplit(parsed).rstrip('/')}"
+        "/?dashboard=1&notificationSetup=1&syncSetup=1"
+    )
+    return webbrowser.open(url, new=1)
+
+
 async def _wait_for_health(host: str, port: int, timeout: float = 30.0) -> dict | None:
     """Poll /health until it returns 200 or the timeout elapses."""
     url = f"http://{host}:{port}/health"
@@ -102,15 +118,14 @@ async def _wait_for_health(host: str, port: int, timeout: float = 30.0) -> dict 
 
 async def run(info_q=None) -> None:
     # ---- Stage 0: first-run provisioning + setup wizard ---------------
-    # Generate a host-unique CHAT_API_TOKEN on first run (persisted to .env) so a
-    # freshly-installed server "just works" and every machine gets its own key.
+    # Generate a host-unique control key on first run (persisted to .env).
     # Must happen BEFORE importing app/config (config reads .env at import time).
     from provisioning import (ensure_api_token, ensure_entra_tenant,
                               ensure_tunnel_id, write_connection_card)
 
     api_key, created = ensure_api_token()
     if created:
-        log.info("[startup 0/%d] Generated a new host-unique API key (saved to .env).",
+        log.info("[startup 0/%d] Generated a host-only control key (saved to .env).",
                  _TOTAL_STAGES)
     # Dev Tunnel ids are GLOBALLY unique; a shared id collides across machines
     # ("Unauthorized tunnel access ... expected [host]"), so give every host its own.
@@ -149,6 +164,12 @@ async def run(info_q=None) -> None:
     from app import APP, CONFIG, RUNNER  # importing wires config + AI provider
 
     host, port = CONFIG.HOST, CONFIG.PORT
+
+    def _write_connection_card(public_url, local_url, key, provider):
+        return write_connection_card(
+            public_url, local_url, key, provider,
+            auth_mode=CONFIG.AUTH_MODE, tunnel_auth=CONFIG.TUNNEL_AUTH,
+        )
 
     # ---- Stage 2: AI provider -----------------------------------------
     provider_name = getattr(RUNNER, "display_name", "AI provider")
@@ -198,7 +219,7 @@ async def run(info_q=None) -> None:
 
     stop = asyncio.Event()
     APP["cb_stop"] = stop
-    controller = Controller(None, CONFIG, write_connection_card, api_key,
+    controller = Controller(None, CONFIG, _write_connection_card, api_key,
                             getattr(RUNNER, "name", "copilot"), None, host, port)
     APP["cb_controller"] = controller
 
@@ -247,8 +268,10 @@ async def run(info_q=None) -> None:
 
     local_url = f"http://{host}:{port}"
     provider = getattr(RUNNER, "name", "copilot")
-    card = write_connection_card(public_url, local_url, api_key, provider)
-    _print_ready_banner(host, port, public_url, bool(CONFIG.CHAT_API_TOKEN), provider)
+    card = _write_connection_card(public_url, local_url, api_key, provider)
+    _print_ready_banner(
+        host, port, public_url, CONFIG.AUTH_MODE, CONFIG.TUNNEL_AUTH, provider
+    )
     for line in card.splitlines():
         log.info(line)
 
@@ -294,8 +317,8 @@ async def run(info_q=None) -> None:
         await app_runner.cleanup()
 
 
-def _print_ready_banner(host: str, port: int, public_url: str | None, has_token: bool,
-                        provider: str = "copilot") -> None:
+def _print_ready_banner(host: str, port: int, public_url: str | None, auth_mode: str,
+                        tunnel_auth: str, provider: str = "copilot") -> None:
     bar = "=" * 62
     log.info(bar)
     log.info("  Copilot Bridge is READY")
@@ -304,8 +327,18 @@ def _print_ready_banner(host: str, port: int, public_url: str | None, has_token:
     if public_url:
         log.info("  Public  : %s", public_url)
         log.info("            %s/api/chat   %s/health", public_url, public_url)
-    log.info("  Auth    : %s", "X-API-Key required" if has_token
-             else "OPEN — no token set (anyone with the URL can run the AI)")
+    auth_mode = (auth_mode or "tunnel").strip().lower()
+    if auth_mode == "tunnel":
+        remote = "Microsoft tenant sign-in" if tunnel_auth == "tenant" \
+            else "Microsoft owner sign-in"
+        auth_summary = f"localhost trusted; remote {remote}"
+    elif auth_mode == "entra":
+        auth_summary = "Microsoft Entra sign-in"
+    elif auth_mode == "both":
+        auth_summary = "Microsoft Entra sign-in or API key"
+    else:
+        auth_summary = "API key required"
+    log.info("  Auth    : %s", auth_summary)
     log.info("  Stop    : Ctrl+C")
     log.info(bar)
 
@@ -342,6 +375,10 @@ def _run_gui() -> None:
     from gui import run_setup_wizard, show_connection_info, show_message
     from paths import app_base_dir
 
+    marker = app_base_dir() / ".setup-done"
+    run_setup = "--setup" in sys.argv or not marker.exists()
+    notification_setup = "--notification-setup" in sys.argv or run_setup
+
     def _show_running_info(heading: str, note: str | None = None) -> None:
         """Show the already-running server's connection details.
 
@@ -374,6 +411,11 @@ def _run_gui() -> None:
     # re-launching would crash with "address already in use" (WinError 10048).
     # Detect it and just show that instance's connection details instead.
     if _probe_health(cfg.HOST, cfg.PORT) is not None:
+        if notification_setup:
+            try:
+                _open_notification_setup(f"http://localhost:{cfg.PORT}")
+            except Exception as exc:  # noqa: BLE001
+                log.debug("notification setup page failed to open: %s", exc)
         _show_running_info("Copilot Bridge is already running")
         return
 
@@ -389,8 +431,7 @@ def _run_gui() -> None:
         except Exception as exc:  # noqa: BLE001
             log.debug("tunnel discovery failed: %s", exc)
 
-    marker = app_base_dir() / ".setup-done"
-    if ("--setup" in sys.argv) or (not marker.exists()):
+    if run_setup:
         # First run or forced: the full wizard (Dev Tunnel + AI tool choice).
         try:
             run_setup_wizard(cfg, tunnel)
@@ -429,7 +470,16 @@ def _run_gui() -> None:
             except Exception:  # noqa: BLE001
                 pass
 
-    threading.Thread(target=_serve, name="copilot-bridge-server", daemon=False).start()
+    server_thread = threading.Thread(
+        target=_serve, name="copilot-bridge-server", daemon=False
+    )
+    server_thread.start()
+
+    def _wait_for_server() -> None:
+        # Returning from the main thread starts Python's executor shutdown hooks
+        # even while a non-daemon server thread is still alive. Keep the main
+        # thread here until the control API performs a real server shutdown.
+        server_thread.join()
 
     # Wait for startup (tunnel hosting retries can take a little while), then show
     # the info. The timeout exceeds the tunnel's own retry budget so we normally
@@ -441,6 +491,11 @@ def _run_gui() -> None:
 
     # Success: the server is up — show the live connection details.
     if info and not info.get("error"):
+        if notification_setup and info.get("localUrl"):
+            try:
+                _open_notification_setup(info["localUrl"])
+            except Exception as exc:  # noqa: BLE001
+                log.debug("notification setup page failed to open: %s", exc)
         try:
             show_connection_info(info.get("publicUrl"), info.get("localUrl"),
                                  info.get("apiKey"), info.get("provider", "copilot"),
@@ -449,12 +504,14 @@ def _run_gui() -> None:
                                       "View Connection Info.")
         except Exception as exc:  # noqa: BLE001
             log.debug("connection info window failed: %s", exc)
+        _wait_for_server()
         return
 
     # Startup failed or timed out. If another copy grabbed the port meanwhile,
     # show its details; otherwise explain the failure clearly (no fake "running").
     if _probe_health(cfg.HOST, cfg.PORT) is not None:
         _show_running_info("Copilot Bridge is already running")
+        _wait_for_server()
         return
 
     detail = (info or {}).get("detail", "")
@@ -470,7 +527,7 @@ def _run_gui() -> None:
             "The server didn't start. See the log window for details, then try again."
             + (f"\n\n{detail}" if detail else ""),
             kind="error")
-    # Window closed: the non-daemon server thread (if it started) keeps the process alive.
+    _wait_for_server()
 
 
 def _hide_console() -> None:
@@ -494,10 +551,10 @@ def _hide_console() -> None:
 
 
 def _show_connection_info_only() -> None:
-    """Display the saved endpoint + API key, then exit (the ``--show-info`` flag).
+    """Display the saved endpoints and browser auth, then exit.
 
     Reads ``connection.json`` (written on the last successful run); if the server
-    hasn't run yet it falls back to the local URL + key from ``.env``. Shows a GUI
+    hasn't run yet it falls back to the local URL from config. Shows a GUI
     window on a desktop, otherwise prints the details to the console.
     """
     _hide_console()
@@ -529,7 +586,8 @@ def _show_connection_info_only() -> None:
                        else "Copilot Bridge — connection details")
             note = ("These are saved on this PC. The public URL appears here after you "
                     "start the server at least once." if fresh or not public_url
-                    else "Paste these into the app's Settings on your phone or PC.")
+                    else "Open the public URL and sign in with the tunnel owner's "
+                     "Microsoft account.")
             show_connection_info(public_url, local_url, api_key, provider,
                                  heading=heading, note=note)
             return
@@ -539,10 +597,17 @@ def _show_connection_info_only() -> None:
     # Headless fallback: print the details.
     server_url = public_url or local_url
     bar = "-" * 62
-    for line in (bar, "  COPILOT BRIDGE — CONNECTION", f"    Server URL : {server_url}",
-                 f"    Local URL  : {local_url}",
-                 f"    API Key    : {api_key or '(none — auth disabled)'}",
-                 f"    AI Provider: {provider}", bar):
+    auth_mode = (getattr(cfg, "AUTH_MODE", "tunnel") or "tunnel").strip().lower()
+    auth_summary = (
+        "localhost trusted; remote Microsoft sign-in"
+        if auth_mode == "tunnel" else auth_mode
+    )
+    lines = [bar, "  COPILOT BRIDGE — CONNECTION", f"    Server URL : {server_url}",
+             f"    Local URL  : {local_url}", f"    Browser auth: {auth_summary}"]
+    if auth_mode in ("apikey", "both"):
+        lines.append(f"    API Key    : {api_key or '(not configured)'}")
+    lines += [f"    AI Provider: {provider}", bar]
+    for line in lines:
         log.info(line)
     if fresh:
         log.info("Note: start the server once to obtain the public (internet) URL.")

@@ -30,8 +30,12 @@ workspace/
 **/workspace/
 copilot-session-*.md
 
-# Persistent server-owned chat sessions (one json per conversation)
+# Persistent server-owned SQLite database, legacy JSON sessions, and WAL files
 server/sessions/
+# DPAPI-protected delegated token caches are still per-user runtime state.
+server/secrets/
+# Source-run marker containing this machine's selected local OneDrive root.
+server/sync/onedrive-local.enabled
 
 # ===== Bundled tooling (devtunnel binary downloaded by scripts/install.ps1) =====
 tools/

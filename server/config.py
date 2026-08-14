@@ -133,6 +133,35 @@ class DefaultConfig:
     # session store). EMPTY => default to <server dir>/sessions, resolved in webchat.
     SESSIONS_DIR = os.environ.get("SESSIONS_DIR", "")
 
+    # --- Native AI session watcher / unified inbox ---
+    # Poll read-only CLI and VS Code stores for completed responses. Native APIs
+    # are eventually consistent, so require one unchanged scan before alerting.
+    SESSION_WATCHER_ENABLED = _as_bool(
+        os.environ.get("SESSION_WATCHER_ENABLED"), True
+    )
+    SESSION_WATCHER_INTERVAL = float(
+        os.environ.get("SESSION_WATCHER_INTERVAL", "5")
+    )
+    SESSION_WATCHER_SETTLE_SCANS = int(
+        os.environ.get("SESSION_WATCHER_SETTLE_SCANS", "1")
+    )
+
+    # --- OneDrive App Folder synchronization ---
+    # A released product may use its publisher-owned multi-tenant Public Client
+    # registration. Without one, auto mode uses the signed-in local OneDrive
+    # desktop folder instead of an invalid test-tenant application.
+    ONEDRIVE_SYNC_ENABLED = _as_bool(
+        os.environ.get("ONEDRIVE_SYNC_ENABLED"), True
+    )
+    ONEDRIVE_TRANSPORT = os.environ.get("ONEDRIVE_TRANSPORT", "auto").strip().lower()
+    ONEDRIVE_CLIENT_ID = os.environ.get("ONEDRIVE_CLIENT_ID", "").strip()
+    ONEDRIVE_TENANT_ID = os.environ.get("ONEDRIVE_TENANT_ID", "common")
+    ONEDRIVE_LOCAL_ROOT = os.environ.get("ONEDRIVE_LOCAL_ROOT", "").strip()
+    ONEDRIVE_SYNC_SPACE_ID = os.environ.get("ONEDRIVE_SYNC_SPACE_ID", "default")
+    ONEDRIVE_SYNC_INTERVAL = float(
+        os.environ.get("ONEDRIVE_SYNC_INTERVAL", "900")
+    )
+
     # --- Security / UX ---
     # Comma-separated AAD object ids allowed to use the bot.
     # EMPTY => everyone who can reach the bot may run Copilot CLI (NOT recommended).
@@ -147,16 +176,15 @@ class DefaultConfig:
     MAX_ATTACHMENT_MB = int(os.environ.get("MAX_ATTACHMENT_MB", "25"))
     MAX_ATTACHMENTS = int(os.environ.get("MAX_ATTACHMENTS", "8"))
 
-    # Token guarding the direct mobile/web chat API (/api/chat) exposed via the tunnel.
-    # EMPTY => no auth (anyone with the tunnel URL can run Copilot - unsafe). Set a strong value.
+    # Host-only secret used by the desktop control plane. Legacy AUTH_MODE=apikey
+    # also uses it for the web API.
     CHAT_API_TOKEN = os.environ.get("CHAT_API_TOKEN", "")
 
     # --- Identity / auth policy for the direct chat + control API ---
-    # MS edition: user identity is enforced at the Dev Tunnel layer (Microsoft
-    # Entra sign-in, owner-only). The app layer keeps only the per-host API key, so
-    # AUTH_MODE is pinned to 'apikey' -- there is no app-layer Entra config in this
-    # build (no manual tenant/client/allow-list to manage).
-    AUTH_MODE = "apikey"
+    # The default 'tunnel' mode trusts the loopback-only local listener and relies
+    # on the private Dev Tunnel for Microsoft account authentication remotely.
+    # It fails back to 'apikey' if HOST is non-loopback or the tunnel is anonymous.
+    AUTH_MODE = os.environ.get("AUTH_MODE", "tunnel").strip().lower()
     # Entra ID app registration the clients sign in against + this server validates.
     # ENTRA_TENANT_ID: your tenant GUID (single-tenant, recommended) or
     #   'organizations'/'common' for multi-tenant. ENTRA_AUDIENCE: the API's

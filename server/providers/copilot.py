@@ -30,6 +30,7 @@ class CopilotProvider(AIProvider):
         new_session: bool = False,
         session_id: str | None = None,
         attachments: list[str] | None = None,
+        history: list[dict] | None = None,
     ) -> AIResult:
         r = await self._runner.run(
             prompt,
@@ -37,6 +38,7 @@ class CopilotProvider(AIProvider):
             new_session=new_session,
             session_id=session_id,
             attachments=attachments,
+            history=history,
         )
         return AIResult(
             ok=r.ok, text=r.text, exit_code=r.exit_code,

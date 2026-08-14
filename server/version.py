@@ -7,4 +7,4 @@ surfaces it in ``/health``; keep it in step with the installer ``-Version`` at
 release time.
 """
 
-__version__ = "2.1.0"
+__version__ = "2.2.3"

@@ -40,10 +40,12 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $py   = Join-Path $root ".venv\Scripts\python.exe"
+$serverPy = Join-Path $root "server\.venv\Scripts\python.exe"
 $entry = Join-Path $root "server\launcher.py"
 $webapp = Join-Path $root "server\webapp"
 
-if (-not (Test-Path $py)) { throw "venv python not found at $py - run scripts\install.ps1 first." }
+if (-not (Test-Path $py) -and (Test-Path $serverPy)) { $py = $serverPy }
+if (-not (Test-Path $py)) { throw "venv python not found - run scripts\install.ps1 first." }
 
 Write-Host "Ensuring PyInstaller is installed..." -ForegroundColor Cyan
 & $py -m pip install --quiet --disable-pip-version-check pyinstaller | Out-Null
@@ -52,10 +54,12 @@ Write-Host "Ensuring PyInstaller is installed..." -ForegroundColor Cyan
 # botbuilder/botframework are namespace packages PyInstaller needs help finding.
 $hidden = @(
     "app", "config", "webchat", "bot", "copilot_runner", "copilot_sessions",
-    "session_store", "provisioning", "paths", "devtunnel", "setup", "gui",
+    "session_store", "session_watcher", "onedrive_auth", "onedrive_local", "provisioning", "paths", "devtunnel", "setup", "gui",
     "control", "auth", "version",
     "providers", "providers.base", "providers.registry", "providers.copilot",
-    "providers.claude", "providers.openai"
+    "providers.claude", "providers.openai",
+    "sync", "sync.engine", "sync.packages", "sync.coordinator", "sync.service",
+    "transports", "transports.base", "transports.filesystem", "transports.onedrive"
 )
 $collect = @("botbuilder", "botframework", "aiohttp", "dotenv", "jwt", "cryptography", "msrest", "msal")
 

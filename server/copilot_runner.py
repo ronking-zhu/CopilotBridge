@@ -117,6 +117,24 @@ class CopilotRunner:
                 args += ["--attachment", path]
         return args
 
+    @staticmethod
+    def _history_prompt(prompt: str, history: list[dict]) -> str:
+        lines = ["Previous conversation context:"]
+        for message in history:
+            role = "User" if message.get("role") == "user" else "Assistant"
+            text = message.get("text") or ""
+            if text:
+                lines.append(f"\n[{role}]\n{text}")
+        lines.append(f"\n[Current user request]\n{prompt}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _native_session_exists(session_id: str | None) -> bool:
+        if not session_id:
+            return False
+        home = os.environ.get("COPILOT_HOME") or os.path.join(os.path.expanduser("~"), ".copilot")
+        return os.path.isdir(os.path.join(home, "session-state", session_id))
+
     async def _run_once(self, args: list[str]) -> CopilotResult:
         cmd = self._launcher() + args
         logger.info("Running Copilot: %s", " ".join(cmd[:-len(args)] + ["-p", "<prompt>"] + args[2:]))
@@ -149,7 +167,8 @@ class CopilotRunner:
     # -- public API -------------------------------------------------------
 
     async def run(self, prompt: str, conversation_id=None, new_session=False, session_id=None,
-                  attachments: list[str] | None = None) -> CopilotResult:
+                  attachments: list[str] | None = None,
+                  history: list[dict] | None = None) -> CopilotResult:
         # An explicit session_id (e.g. from the persistent SessionStore) is used
         # directly as the Copilot --session-id. Otherwise fall back to the legacy
         # in-memory per-conversation mapping that bot.py / local_test.py rely on.
@@ -158,7 +177,11 @@ class CopilotRunner:
         else:
             used = self._session_for(conversation_id, new_session)
 
-        result = await self._run_once(self._build_args(prompt, used, attachments))
+        effective_prompt = prompt
+        if history and used and not self._native_session_exists(used):
+            effective_prompt = self._history_prompt(prompt, history)
+
+        result = await self._run_once(self._build_args(effective_prompt, used, attachments))
         result.session_id = used
 
         # If resuming an existing session failed, retry once statelessly; the
@@ -166,7 +189,7 @@ class CopilotRunner:
         # re-sent so the image context isn't lost on the retry.
         if not result.ok and used and not result.timed_out:
             logger.info("Retrying without session after failure (exit=%s)", result.exit_code)
-            retry = await self._run_once(self._build_args(prompt, None, attachments))
+            retry = await self._run_once(self._build_args(effective_prompt, None, attachments))
             retry.session_id = None
             if retry.ok:
                 if not session_id:

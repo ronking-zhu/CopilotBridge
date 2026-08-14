@@ -67,7 +67,7 @@ RestartApplications=no
 SetupLogging=yes
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
+Name: "desktopicon"; Description: "Create a desktop &Control Panel shortcut"; GroupDescription: "Shortcuts:"
 Name: "addtopath";   Description: "Add Copilot Bridge to the system &PATH"; GroupDescription: "System:"
 
 [Files]
@@ -89,7 +89,7 @@ Name: "{group}\Copilot Bridge Server"; Filename: "{app}\{#AppExe}"
 Name: "{group}\Copilot Bridge Control Panel"; Filename: "{app}\{#AppExe}"; Parameters: "--control-panel"; Comment: "Start, stop, or restart the server and Dev Tunnel"
 Name: "{group}\View Connection Info"; Filename: "{app}\{#AppExe}"; Parameters: "--show-info"; Comment: "Show this PC's server URL and API key"
 Name: "{group}\Uninstall Copilot Bridge"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Copilot Bridge Server"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+Name: "{autodesktop}\Copilot Bridge Control Panel"; Filename: "{app}\{#AppExe}"; Parameters: "--control-panel"; Tasks: desktopicon
 
 [Registry]
 ; Add the install dir to the system PATH (when the task is selected). The check
@@ -99,8 +99,10 @@ Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environmen
   Check: NeedsAddPath('{app}'); Tasks: addtopath
 
 [Run]
-; Offer to launch the server right after install (shows the sign-in dialog).
-Filename: "{app}\{#AppExe}"; Description: "Start Copilot Bridge Server now"; \
+; Offer to launch the server and browser onboarding right after install.
+Filename: "{app}\{#AppExe}"; Parameters: "--notification-setup"; Description: "Start Copilot Bridge and configure notifications + OneDrive sync"; \
+  Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExe}"; Parameters: "--control-panel"; Description: "Open Copilot Bridge Control Panel"; \
   Flags: nowait postinstall skipifsilent
 
 [UninstallRun]

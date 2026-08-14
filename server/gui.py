@@ -547,7 +547,9 @@ def _force_kill_server(tunnel_id: str = "copilot-bridge") -> bool:
 
 def _identity_summary(cfg) -> str:
     """One-line description of the current sign-in mode for the Control Panel."""
-    mode = (getattr(cfg, "AUTH_MODE", "apikey") or "apikey").strip().lower()
+    mode = (getattr(cfg, "AUTH_MODE", "tunnel") or "tunnel").strip().lower()
+    if mode == "tunnel":
+        return "Mode: localhost trusted \u00b7 remote Microsoft Dev Tunnel"
     if mode == "apikey":
         return "Mode: shared API key"
     tid = (getattr(cfg, "ENTRA_TENANT_ID", "") or "").strip()
@@ -589,8 +591,9 @@ def _identity_dialog(parent, cfg, on_saved=None) -> None:
 
     ttk.Label(f, text="Microsoft Entra ID sign-in",
               font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
-    ttk.Label(f, text="Let people sign in with their Microsoft work account instead of "
-                      "sharing one API key.", foreground="#555", wraplength=540,
+    ttk.Label(f, text="Default tunnel mode trusts localhost and requires Microsoft "
+                      "sign-in remotely. App-level Entra modes are available for "
+                      "advanced deployments.", foreground="#555", wraplength=540,
               justify="left").grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 12))
 
     # Heads-up when the built-in TEST Entra ID (the maintainer's) is still in use,
@@ -616,10 +619,10 @@ def _identity_dialog(parent, cfg, on_saved=None) -> None:
 
     # Sign-in mode -----------------------------------------------------------
     ttk.Label(f, text="Sign-in mode").grid(row=2, column=0, sticky="w", pady=4)
-    mode_var = tk.StringVar(value=(getattr(cfg, "AUTH_MODE", "apikey") or "apikey").strip().lower())
+    mode_var = tk.StringVar(value=(getattr(cfg, "AUTH_MODE", "tunnel") or "tunnel").strip().lower())
     ttk.Combobox(f, textvariable=mode_var, state="readonly", width=14,
-                 values=["apikey", "both", "entra"]).grid(row=2, column=1, sticky="w", pady=4)
-    ttk.Label(f, text="apikey = shared key \u00b7 both = either \u00b7 entra = Microsoft only",
+                 values=["tunnel", "apikey", "both", "entra"]).grid(row=2, column=1, sticky="w", pady=4)
+    ttk.Label(f, text="tunnel = local trusted + remote Microsoft \u00b7 apikey = legacy",
               foreground="#888", font=("Segoe UI", 8)).grid(row=2, column=2, sticky="w", padx=6)
 
     # Tenant id (+ Detect) ---------------------------------------------------
@@ -671,8 +674,8 @@ def _identity_dialog(parent, cfg, on_saved=None) -> None:
         for entry, val in ((e_tenant, tid), (e_client, cid), (e_aud, aud), (e_scopes, scopes)):
             entry.delete(0, "end")
             entry.insert(0, val)
-        # A preset is meant to be used, so flip to Microsoft sign-in if still on apikey.
-        if mode_var.get().strip().lower() == "apikey":
+        # A preset is meant for app-level Entra, not tunnel/API-key mode.
+        if mode_var.get().strip().lower() in ("tunnel", "apikey"):
             mode_var.set("entra")
         admin = (preset.get("admin_contact") or "").strip()
         if admin:
@@ -937,6 +940,54 @@ def _valid_user_id(value: str) -> bool:
     return bool(_EMAIL_RE.match(value) or _USER_GUID_RE.match(value))
 
 
+def _format_sync_status(sync: dict | None) -> str:
+    """Return a compact native-Control-Panel summary of sync state."""
+    sync = sync or {}
+    if sync.get("serverStopped"):
+        return "Start the server to manage OneDrive sync."
+    if not sync.get("enabled"):
+        detail = str(sync.get("error") or "").strip()
+        return "OneDrive sync unavailable." + (f" {detail}" if detail else "")
+
+    auth = sync.get("auth") or {}
+    if not auth.get("configured"):
+        return "OneDrive sync needs a publisher Public Client id."
+    pending = int(sync.get("pendingEventCount") or 0)
+    if sync.get("running"):
+        return "Syncing: uploading local sessions, then downloading remote sessions..."
+    if not auth.get("connected"):
+        text = "Not connected"
+        if pending:
+            text += f" - {pending} local event{'s' if pending != 1 else ''} waiting to upload"
+        if sync.get("lastError"):
+            text += f" - last error: {sync['lastError']}"
+        return text
+
+    username = str(auth.get("username") or "Microsoft account")
+    if auth.get("mode") == "local-folder":
+        scope = str(auth.get("scope") or "Local OneDrive folder")
+        parts = [f"Connected: {scope} ({username})"]
+        root = str(auth.get("root") or "").strip()
+        if root:
+            parts.append(root)
+    else:
+        parts = [f"Connected: {username}"]
+    if sync.get("lastSuccess"):
+        parts.append("last sync completed")
+    result = sync.get("lastResult") or {}
+    pushed = int(result.get("pushedEventCount") or 0)
+    pulled = int(result.get("pulledEventCount") or 0)
+    if pushed:
+        parts.append(f"uploaded {pushed}")
+    if pulled:
+        parts.append(f"downloaded {pulled}")
+    if pending:
+        parts.append(f"{pending} waiting to upload")
+    if sync.get("lastError"):
+        parts.append(f"error: {sync['lastError']}")
+    return " - ".join(parts)
+
+
 def _users_dialog(parent, cfg, on_saved=None) -> None:
     """Manage WHO may use this server: the ``ENTRA_ALLOWED_USERS`` allow-list.
 
@@ -1100,7 +1151,9 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     import queue
     import threading
     import time
+    import urllib.error
     import urllib.request
+    import webbrowser
 
     base = f"http://{getattr(cfg, 'HOST', 'localhost')}:{getattr(cfg, 'PORT', 3978)}"
     key = getattr(cfg, "CHAT_API_TOKEN", "")
@@ -1116,6 +1169,10 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
 
     def _local_url():
         return f"http://{_host}:{net['port']}"
+
+    def _dashboard_url():
+        browser_host = "localhost" if _host in ("", "0.0.0.0", "::") else _host
+        return f"http://{browser_host}:{net['port']}/?dashboard=1&syncSetup=1"
 
     def _probe_base():
         return f"http://{_phost}:{net['port']}"
@@ -1136,24 +1193,39 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
             req.add_header("X-API-Key", key)
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read().decode("utf-8", "replace")
-            return json.loads(raw) if raw.strip() else {}
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read().decode("utf-8", "replace")
+                return json.loads(raw) if raw.strip() else {}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", "replace")
+            try:
+                detail = json.loads(raw).get("error") or raw
+            except Exception:  # noqa: BLE001
+                detail = raw
+            raise RuntimeError(str(detail or f"HTTP {exc.code}")) from exc
 
     def fetch_status():
         try:
             s = http("GET", "/api/control/status", timeout=3)
             s["server"] = "running"
+            try:
+                s["sync"] = http("GET", "/api/sync/status", timeout=3)
+            except Exception as exc:  # noqa: BLE001
+                s["sync"] = {"enabled": False, "error": str(exc)}
             return s
         except Exception:  # noqa: BLE001
-            return {"server": "stopped"}
+            return {
+                "server": "stopped",
+                "sync": {"enabled": False, "serverStopped": True},
+            }
 
     root = tk.Tk()
     root.title(parent_title + " — Control Panel")
-    root.geometry("660x640")
+    root.geometry("700x760")
     root.resizable(True, True)
     try:
-        root.minsize(640, 560)
+        root.minsize(660, 700)
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -1181,7 +1253,7 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     titlebox.pack(side="left", fill="x", expand=True)
     ttk.Label(titlebox, text="Copilot Bridge — Control Panel",
               font=("Segoe UI", 14, "bold")).pack(anchor="w")
-    ttk.Label(titlebox, text="Manually start, stop, or restart the server and the Dev Tunnel.",
+    ttk.Label(titlebox, text="Manage the server, Dev Tunnel, Dashboard, and OneDrive sync.",
               foreground="#555").pack(anchor="w", pady=(2, 0))
     _ver = app_version()
     ttk.Label(header, text=(f"v{_ver}" if _ver else ""),
@@ -1263,6 +1335,25 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
                                    "Opening a browser to sign in to Dev Tunnel\u2026"))
     relogin_btn.pack(side="right")
 
+    # ---- OneDrive synchronization ----
+    syncrow = ttk.LabelFrame(frm, text="OneDrive session sync", padding=12)
+    syncrow.pack(fill="x", pady=(10, 0))
+    sync_status = ttk.Label(
+        syncrow, text="checking...", font=("Segoe UI", 9),
+        foreground="#555", wraplength=630, justify="left",
+    )
+    sync_status.pack(fill="x", anchor="w")
+    sync_btns = ttk.Frame(syncrow)
+    sync_btns.pack(fill="x", pady=(9, 0))
+    sync_dashboard = ttk.Button(sync_btns, text="Open AI Dashboard")
+    sync_connect = ttk.Button(sync_btns, text="Connect OneDrive...")
+    sync_now = ttk.Button(sync_btns, text="Upload + download now")
+    sync_disconnect = ttk.Button(sync_btns, text="Disconnect")
+    sync_dashboard.pack(side="left", padx=(0, 5))
+    sync_connect.pack(side="left", padx=5)
+    sync_now.pack(side="left", padx=5)
+    sync_disconnect.pack(side="right", padx=(5, 0))
+
     statusline = ttk.Label(frm, text="", foreground="#0a7", wraplength=600, justify="left")
     statusline.pack(anchor="w", pady=(10, 0))
 
@@ -1294,6 +1385,19 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
         t_stop.config(state="normal" if (tun_ok and tstate == "running" and not b) else "disabled")
         t_restart.config(state="normal" if (tun_ok and tstate in ("running", "down") and not b) else "disabled")
         port_btn.config(state="disabled" if b else "normal")
+        sync = st.get("sync") or {}
+        sync_status.config(
+            text=_format_sync_status(sync),
+            foreground=("#c33" if sync.get("lastError") else "#555"),
+        )
+        auth = sync.get("auth") or {}
+        sync_available = server_up and bool(sync.get("enabled")) and bool(auth.get("configured"))
+        sync_connected = sync_available and bool(auth.get("connected"))
+        sync_dashboard.config(state="normal" if (server_up and not b) else "disabled")
+        sync_connect.config(
+            state="normal" if (sync_available and not sync_connected and not b) else "disabled")
+        sync_now.config(state="normal" if (sync_connected and not b) else "disabled")
+        sync_disconnect.config(state="normal" if (sync_connected and not b) else "disabled")
 
     def start_fetch():
         if state["fetching"]:
@@ -1325,7 +1429,10 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
             return
         state["busy"] = True
         set_status(msg)
-        for btn in (s_start, s_stop, s_restart, t_start, t_stop, t_restart, port_btn):
+        for btn in (
+            s_start, s_stop, s_restart, t_start, t_stop, t_restart, port_btn,
+            sync_dashboard, sync_connect, sync_now, sync_disconnect,
+        ):
             btn.config(state="disabled")
 
         def work():
@@ -1447,6 +1554,35 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
             pass
         return True, f"Signed in to Dev Tunnel as {who}. Public URL re-hosted under this account."
 
+    def act_open_dashboard():
+        if fetch_status().get("server") != "running":
+            return False, "Start the server before opening the AI Dashboard."
+        url = _dashboard_url()
+        if not webbrowser.open(url, new=1):
+            return False, f"Couldn't open the browser. Open this URL manually: {url}"
+        return True, "AI Dashboard opened in your browser."
+
+    def act_sync_connect():
+        try:
+            result = http("POST", "/api/sync/connect", body={}, timeout=420)
+            return True, "OneDrive connected and first sync completed. " + _format_sync_status(result)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"OneDrive connection failed: {exc}"
+
+    def act_sync_now():
+        try:
+            result = http("POST", "/api/sync/run", body={}, timeout=420)
+            return True, "Upload + download completed. " + _format_sync_status(result)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"OneDrive sync failed: {exc}"
+
+    def act_sync_disconnect():
+        try:
+            http("POST", "/api/sync/disconnect", body={}, timeout=30)
+            return True, "OneDrive disconnected. Local sessions and pending uploads were kept."
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Couldn't disconnect OneDrive: {exc}"
+
     def act_change_port(raw):
         """Change the listen+forward port: stop, FULLY free the old port, restart."""
         try:
@@ -1522,6 +1658,16 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     port_btn.config(command=lambda: run_action(
         lambda: act_change_port(port_var.get()),
         "Changing the port (stopping, freeing, restarting)\u2026"))
+
+    sync_dashboard.config(command=lambda: run_action(
+        act_open_dashboard, "Opening the AI Dashboard..."))
+    sync_connect.config(command=lambda: run_action(
+        act_sync_connect,
+        "Connecting OneDrive. Local sessions upload before remote sessions download..."))
+    sync_now.config(command=lambda: run_action(
+        act_sync_now, "Uploading local changes, then downloading remote changes..."))
+    sync_disconnect.config(command=lambda: run_action(
+        act_sync_disconnect, "Disconnecting OneDrive..."))
 
     start_fetch()
     start_account_fetch()

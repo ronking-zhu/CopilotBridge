@@ -2,7 +2,10 @@
 
 Selected by ``config.AUTH_MODE``:
 
-* ``apikey`` (default) - the legacy shared ``CHAT_API_TOKEN`` (sent as
+* ``tunnel`` (default) - the server listens only on loopback; local browsers are
+    trusted and remote access is authenticated by the private Microsoft Dev Tunnel.
+    The API key remains reserved for the desktop control plane.
+* ``apikey`` - the legacy shared ``CHAT_API_TOKEN`` (sent as
   ``X-API-Key``, ``Authorization: Bearer``, or a ``?key=`` query param). Behaviour
   is identical to before, so existing installs are unchanged.
 * ``entra`` - **Microsoft Entra ID (Azure AD)** only. The client signs in
@@ -222,10 +225,19 @@ class Authenticator:
     """Decides whether a request may use the API, per ``config.AUTH_MODE``."""
 
     def __init__(self, config):
-        self.mode = (getattr(config, "AUTH_MODE", "apikey") or "apikey").strip().lower()
-        if self.mode not in ("apikey", "entra", "both"):
+        self.mode = (getattr(config, "AUTH_MODE", "tunnel") or "tunnel").strip().lower()
+        if self.mode not in ("tunnel", "apikey", "entra", "both"):
             logger.warning("Unknown AUTH_MODE %r; falling back to 'apikey'.", self.mode)
             self.mode = "apikey"
+        if self.mode == "tunnel":
+            host = (getattr(config, "HOST", "localhost") or "localhost").strip().lower()
+            tunnel_auth = (getattr(config, "TUNNEL_AUTH", "private") or "private").strip().lower()
+            if host not in ("localhost", "127.0.0.1", "::1") or tunnel_auth == "anonymous":
+                logger.error(
+                    "AUTH_MODE=tunnel requires a loopback HOST and an authenticated tunnel; "
+                    "falling back to API-key authentication."
+                )
+                self.mode = "apikey"
         self.api_token = getattr(config, "CHAT_API_TOKEN", "") or ""
         self.entra_client_id = getattr(config, "ENTRA_CLIENT_ID", "") or ""
         self.entra_scopes = list(getattr(config, "ENTRA_SCOPES", []) or [])
@@ -262,6 +274,9 @@ class Authenticator:
     def check(self, request, allow_query: bool = False) -> bool:
         """True if the request is authorized. Stashes the verified Entra user (if
         any) on ``request['cb_user']`` for audit logging."""
+        if self.mode == "tunnel":
+            return True
+
         # Try Entra first when enabled and a JWT-looking token is present. Plain
         # <img>/download requests can't set an Authorization header, so when
         # ``allow_query`` is set we also accept the access token as a query param.
@@ -318,7 +333,10 @@ class Authenticator:
 
     def describe(self) -> dict:
         """Client-facing auth config for /api/webconfig (no secrets)."""
-        info = {"authMode": self.mode, "authRequired": bool(self.api_token) or self.mode != "apikey"}
+        auth_required = self.mode != "tunnel" and (
+            bool(self.api_token) or self.mode != "apikey"
+        )
+        info = {"authMode": self.mode, "authRequired": auth_required}
         if self.mode in ("entra", "both") and self.entra.enabled:
             authority = f"{_AUTHORITY_HOST}/{self.entra.tenant_id}"
             # Default the requested scope to the API's own access_as_user if the

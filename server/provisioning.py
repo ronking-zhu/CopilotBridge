@@ -3,11 +3,10 @@
 Makes the server self-configuring so it can be shipped as a single ``.exe`` that
 "just works" on any host:
 
-* :func:`ensure_api_token` generates a strong, **host-unique** ``CHAT_API_TOKEN``
-  the first time the server runs and persists it to ``.env``. Two different
-  machines therefore end up with two different keys automatically.
-* :func:`write_connection_card` records the public URL + API key (the exact
-  values a client needs) to ``connection.json`` and returns a printable block.
+* :func:`ensure_api_token` generates a strong, **host-unique** control-plane
+    ``CHAT_API_TOKEN`` the first time the server runs and persists it to ``.env``.
+* :func:`write_connection_card` records the public URL + host control key for
+    local desktop helpers in ``connection.json`` and returns a printable block.
 
 Both are idempotent and never overwrite a value the user set themselves.
 """
@@ -506,18 +505,25 @@ def write_connection_card(
     api_key: str,
     provider: str = "copilot",
     path: Path | str = CONNECTION_PATH,
+    *,
+    auth_mode: str = "tunnel",
+    tunnel_auth: str = "private",
 ) -> str:
     """Persist the client connection details and return a printable block.
 
-    The URL is host-specific (the Dev Tunnel address) and the key is host-unique,
-    so the saved card is exactly what *this* machine's clients should use.
+    The host control key remains in the local JSON for desktop helpers, but is
+    shown to users only when legacy API-key browser authentication is active.
     """
     server_url = public_url or local_url
+    auth_mode = (auth_mode or "tunnel").strip().lower()
+    tunnel_auth = (tunnel_auth or "private").strip().lower()
     card = {
         "serverUrl": server_url,
         "localUrl": local_url,
         "publicUrl": public_url,
         "apiKey": api_key,
+        "authMode": auth_mode,
+        "tunnelAuth": tunnel_auth,
         "provider": provider,
         "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
@@ -529,13 +535,26 @@ def write_connection_card(
     bar = "-" * 62
     lines = [
         bar,
-        "  CLIENT CONNECTION (paste these into the app's Settings)",
+        "  COPILOT BRIDGE CONNECTION",
         f"    Server URL : {server_url}",
     ]
     if public_url and public_url != local_url:
         lines.append(f"    Local URL  : {local_url}   (same machine only)")
+    if auth_mode == "tunnel":
+        remote_auth = (
+            "Microsoft tenant sign-in" if tunnel_auth == "tenant"
+            else "Microsoft owner sign-in"
+        )
+        lines.append(f"    Browser auth: localhost trusted; remote {remote_auth}")
+    elif auth_mode == "entra":
+        lines.append("    Browser auth: Microsoft Entra sign-in")
+    elif auth_mode == "both":
+        lines.append("    Browser auth: Microsoft Entra sign-in or API key")
+        lines.append(f"    API Key    : {api_key or '(not configured)'}")
+    else:
+        lines.append("    Browser auth: API key")
+        lines.append(f"    API Key    : {api_key or '(not configured)'}")
     lines += [
-        f"    API Key    : {api_key or '(none — auth disabled)'}",
         f"    AI Provider: {provider}",
         f"    Saved to   : {Path(path)}",
         bar,

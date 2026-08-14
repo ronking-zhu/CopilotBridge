@@ -69,6 +69,7 @@ class ClaudeProvider(AIProvider):
         new_session: bool = False,
         session_id: str | None = None,
         attachments: list[str] | None = None,
+        history: list[dict] | None = None,
     ) -> AIResult:
         if not self.available:
             return AIResult(
@@ -80,6 +81,18 @@ class ClaudeProvider(AIProvider):
         # Claude reads attachments from the prompt text/paths; for parity we append
         # any provided file paths so the model can see them.
         full_prompt = prompt
+        if history:
+            transcript = []
+            for message in history:
+                role = "User" if message.get("role") == "user" else "Assistant"
+                text = message.get("text") or ""
+                if text:
+                    transcript.append(f"[{role}]\n{text}")
+            if transcript:
+                full_prompt = (
+                    "Previous conversation context:\n\n" + "\n\n".join(transcript)
+                    + f"\n\n[Current user request]\n{prompt}"
+                )
         if attachments:
             joined = "\n".join(p for p in attachments if p)
             if joined:

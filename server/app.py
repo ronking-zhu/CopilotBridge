@@ -74,7 +74,7 @@ async def health(req: Request) -> Response:  # noqa: ARG001
     # supersedes the legacy Bot-Framework/Teams indicators for the web+mobile
     # clients, so surface it here; fall back to the old signals otherwise.
     identity_mode = (getattr(CONFIG, "AUTH_MODE", "apikey") or "apikey").strip().lower()
-    if identity_mode in ("entra", "both"):
+    if identity_mode in ("tunnel", "entra", "both"):
         auth_mode = identity_mode
         allowlist = (len(getattr(CONFIG, "ENTRA_ALLOWED_USERS", []))
                      + len(getattr(CONFIG, "ENTRA_ALLOWED_GROUPS", []))
@@ -142,8 +142,8 @@ def main():
         )
     if not CONFIG.CHAT_API_TOKEN:
         logger.warning(
-            "CHAT_API_TOKEN is empty -> the mobile/web chat API (/api/chat) has NO auth. "
-            "Anyone with the tunnel URL can run Copilot. Set CHAT_API_TOKEN in .env."
+            "CHAT_API_TOKEN is empty -> local control APIs have no host secret. "
+            "Set CHAT_API_TOKEN in .env."
         )
     web.run_app(APP, host=CONFIG.HOST, port=CONFIG.PORT)
 

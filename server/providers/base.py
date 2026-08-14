@@ -49,6 +49,7 @@ class AIProvider(abc.ABC):
         new_session: bool = False,
         session_id: str | None = None,
         attachments: list[str] | None = None,
+        history: list[dict] | None = None,
     ) -> AIResult:
         """Execute one prompt and return the reply."""
         raise NotImplementedError

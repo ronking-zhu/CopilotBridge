@@ -7,9 +7,13 @@ Designed to be reached directly from a phone through a Dev Tunnel:
     GET  /api/chat/{id}                                      -> {status, reply, sessionId, ...}
     POST /api/chat-sync   {message, conversationId, reset?, images?}  -> {reply, sessionId, title, ...}  (waits)
     GET  /api/webconfig                                      -> {authRequired}
+    GET/PATCH /api/settings                                  -> user settings
+    GET  /api/dashboard                                     -> inbox + active job summary
+    GET/PATCH /api/inbox*                                   -> persistent attention inbox
     POST   /api/sessions  {title?}                           -> 201 session summary
     GET    /api/sessions                                     -> [session summaries]
     GET    /api/sessions/{id}                                -> full session (with messages)
+    GET    /api/sessions/{id}/turns                          -> prompt timeline
     POST   /api/sessions/{id}/sync                           -> reconcile with the Copilot CLI's
                                                                  own transcript, then full session
     DELETE /api/sessions/{id}                                -> {deleted: true}
@@ -25,8 +29,9 @@ base64 or a data: URL). The server saves them under ``<workdir>/.uploads/<sid>/`
 passes each to the Copilot CLI through its native ``--attachment`` flag; the saved
 files are recorded on the user message as ``attachments`` so they re-render on reload.
 
-The conversationId a client sends IS the persisted session id and the Copilot CLI
-``--session-id`` (1:1, immutable). A shared token (CHAT_API_TOKEN) protects the API
+The conversationId a client sends is the stable Bridge conversation id. A local
+execution binding maps it to a provider-native session id, so VS Code, Copilot CLI,
+and Bridge ids cannot be confused. A shared token (CHAT_API_TOKEN) protects the API
 since the tunnel is public.
 """
 
@@ -45,6 +50,7 @@ from aiohttp import web
 import copilot_sessions
 from paths import app_base_dir, resource_dir
 from session_store import SessionStore, merge_message_lists
+from session_watcher import SessionWatcher
 
 WEBAPP_DIR = str(resource_dir() / "webapp")
 
@@ -104,6 +110,98 @@ def setup_web_routes(app: web.Application, config, runner):
 
     sessions_dir = getattr(config, "SESSIONS_DIR", "") or str(app_base_dir() / "sessions")
     store = SessionStore(sessions_dir)
+    provider_name = (getattr(runner, "name", "") or "copilot").strip().lower()
+    watcher_enabled = bool(getattr(config, "SESSION_WATCHER_ENABLED", False))
+    watcher = SessionWatcher(
+        store,
+        interval=getattr(config, "SESSION_WATCHER_INTERVAL", 5.0),
+        settle_scans=getattr(config, "SESSION_WATCHER_SETTLE_SCANS", 1),
+    )
+    sync_service = None
+    if bool(getattr(config, "ONEDRIVE_SYNC_ENABLED", False)):
+        from onedrive_auth import OneDriveAuth
+        from onedrive_local import LocalOneDriveConnection, detect_onedrive_root
+        from sync.engine import SyncEngine
+        from sync.service import SyncService
+        from transports.filesystem import FileSystemTransport
+        from transports.onedrive import OneDriveGraphTransport
+
+        sync_mode = getattr(config, "ONEDRIVE_TRANSPORT", "auto") or "auto"
+        client_id = getattr(config, "ONEDRIVE_CLIENT_ID", "")
+        use_graph = sync_mode == "graph" or (sync_mode == "auto" and bool(client_id))
+        if use_graph:
+            sync_auth = OneDriveAuth(
+                client_id,
+                tenant_id=getattr(config, "ONEDRIVE_TENANT_ID", "common"),
+            )
+            sync_transport = OneDriveGraphTransport(sync_auth)
+        else:
+            local_root = detect_onedrive_root(
+                getattr(config, "ONEDRIVE_LOCAL_ROOT", "")
+            )
+            if local_root is not None:
+                sync_auth = LocalOneDriveConnection(local_root)
+                sync_transport = FileSystemTransport(str(sync_auth.sync_root))
+            else:
+                # Keep a useful not-configured state when no signed-in local
+                # OneDrive or publisher Graph registration is available.
+                sync_auth = OneDriveAuth("")
+                sync_transport = OneDriveGraphTransport(sync_auth)
+        sync_engine = SyncEngine(
+            store, sync_transport,
+            space_id=getattr(config, "ONEDRIVE_SYNC_SPACE_ID", "default"),
+        )
+        sync_service = SyncService(
+            store, sync_engine, sync_auth,
+            native_list=copilot_sessions.list_sessions,
+            native_read=copilot_sessions.read_session_key,
+            interval=getattr(config, "ONEDRIVE_SYNC_INTERVAL", 900),
+        )
+
+    def _adapter_for_native_source(source: str) -> str:
+        return {
+            "cli": "copilot-cli",
+            "vscode-insiders": "vscode-insiders-copilot-chat",
+            "vscode": "vscode-copilot-chat",
+        }.get(source, f"{source}-copilot-chat")
+
+    def _native_source_for_adapter(adapter_id: str) -> str:
+        return {
+            "copilot-cli": "cli",
+            "vscode-insiders-copilot-chat": "vscode-insiders",
+            "vscode-copilot-chat": "vscode",
+        }.get(adapter_id, "")
+
+    app["session_store"] = store
+    app["session_watcher"] = watcher
+    app["sync_service"] = sync_service
+
+    async def _start_services(_app: web.Application) -> None:
+        if watcher_enabled:
+            _app["session_watcher_task"] = asyncio.create_task(watcher.run())
+        if sync_service is not None:
+            _app["sync_service_task"] = asyncio.create_task(sync_service.run())
+
+    async def _close_store(_app: web.Application) -> None:
+        watcher.stop()
+        task = _app.get("session_watcher_task")
+        if task is not None:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if sync_service is not None:
+            await sync_service.close()
+            sync_task = _app.get("sync_service_task")
+            if sync_task is not None:
+                try:
+                    await sync_task
+                except asyncio.CancelledError:
+                    pass
+        store.close()
+
+    app.on_startup.append(_start_services)
+    app.on_cleanup.append(_close_store)
 
     # Client-uploaded images live UNDER the Copilot working directory (so they're
     # inside --add-dir and the CLI can read them for --attachment), one folder per
@@ -216,6 +314,29 @@ def setup_web_routes(app: web.Application, config, runner):
         for key in sorted(done, key=lambda k: jobs[k].get("createdAt", 0))[:150]:
             jobs.pop(key, None)
 
+    def _inbox_summary(text: str, limit: int = 240) -> str:
+        collapsed = " ".join((text or "").split())
+        if len(collapsed) <= limit:
+            return collapsed
+        return collapsed[:limit - 3].rstrip() + "..."
+
+    def _record_job_inbox(job_id: str, sid: str, title: str,
+                          reply: str, ok: bool) -> str:
+        item, _created = store.create_inbox_item(
+            dedupe_key=f"bridge-job:{job_id}",
+            source="bridge",
+            source_key=f"bridge:{sid}",
+            conversation_id=sid,
+            title=title or "Untitled conversation",
+            summary=_inbox_summary(reply),
+            metadata={
+                "jobId": job_id,
+                "provider": provider_name,
+                "runState": "completed" if ok else "failed",
+            },
+        )
+        return item["id"]
+
     def _parse(body):
         message = (body.get("message") or "").strip()
         conversation_id = (body.get("conversationId") or "webapp").strip()
@@ -274,8 +395,13 @@ def setup_web_routes(app: web.Application, config, runner):
                 async with lock_for(sid):
                     jobs[job_id]["status"] = "running"
                     jobs[job_id]["queuePosition"] = 0
+                    prior_history = list((store.get(sid) or {}).get("messages", []))
+                    binding = store.get_or_create_execution_binding(sid, provider_name)
                     store.append_message(sid, "user", message, attachments=attach_metas)
-                    result = await runner.run(prompt, session_id=sid, attachments=attach_paths)
+                    result = await runner.run(
+                        prompt, session_id=binding["nativeSessionId"],
+                        attachments=attach_paths, history=prior_history,
+                    )
                     updated = store.append_message(
                         sid, "assistant", result.text or "(no output)",
                         ok=result.ok, exit_code=result.exit_code,
@@ -285,8 +411,19 @@ def setup_web_routes(app: web.Application, config, runner):
                         exitCode=result.exit_code, timedOut=result.timed_out,
                         title=updated.get("title", ""),
                     )
+                    jobs[job_id]["inboxItemId"] = _record_job_inbox(
+                        job_id, sid, updated.get("title", ""),
+                        result.text or "(no output)", result.ok,
+                    )
             except Exception as exc:  # noqa: BLE001
-                jobs[job_id].update(status="done", ok=False, reply=f"Error running Copilot: {exc}")
+                reply = f"Error running Copilot: {exc}"
+                jobs[job_id].update(status="done", ok=False, reply=reply)
+                try:
+                    jobs[job_id]["inboxItemId"] = _record_job_inbox(
+                        job_id, sid, jobs[job_id].get("title", ""), reply, False,
+                    )
+                except Exception:  # noqa: BLE001 - preserve the original job failure
+                    pass
             finally:
                 try:
                     q.remove(job_id)
@@ -346,8 +483,13 @@ def setup_web_routes(app: web.Application, config, runner):
         q.append(ticket)
         try:
             async with lock_for(sid):
+                prior_history = list((store.get(sid) or {}).get("messages", []))
+                binding = store.get_or_create_execution_binding(sid, provider_name)
                 store.append_message(sid, "user", message, attachments=attach_metas)
-                result = await runner.run(prompt, session_id=sid, attachments=attach_paths)
+                result = await runner.run(
+                    prompt, session_id=binding["nativeSessionId"],
+                    attachments=attach_paths, history=prior_history,
+                )
                 session = store.append_message(
                     sid, "assistant", result.text or "(no output)",
                     ok=result.ok, exit_code=result.exit_code,
@@ -366,6 +508,151 @@ def setup_web_routes(app: web.Application, config, runner):
     async def webconfig(request: web.Request) -> web.Response:  # noqa: ARG001
         return web.json_response(authn.describe())
 
+    async def settings_get(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response(store.get_settings())
+
+    async def settings_update(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+            settings = store.update_settings(body)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except Exception:  # noqa: BLE001 - malformed JSON
+            return web.json_response({"error": "invalid json"}, status=400)
+        return web.json_response(settings)
+
+    async def dashboard_get(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        active_jobs = []
+        for job_id, job in jobs.items():
+            if job.get("status") not in ("queued", "running"):
+                continue
+            active_jobs.append({
+                "jobId": job_id,
+                "status": job.get("status"),
+                "conversationId": job.get("conversationId"),
+                "title": job.get("title") or "Untitled conversation",
+                "createdAt": job.get("createdAt"),
+                "queuePosition": job.get("queuePosition", 0),
+            })
+        active_jobs.sort(key=lambda item: item.get("createdAt") or 0, reverse=True)
+        watcher_info = watcher.describe()
+        watcher_info["enabled"] = watcher_enabled
+        return web.json_response({
+            "unreadCount": store.inbox_unread_count(),
+            "runningJobCount": len(active_jobs),
+            "activeJobs": active_jobs,
+            "inbox": store.list_inbox_items(limit=100),
+            "watcher": watcher_info,
+            "sync": sync_service.describe() if sync_service is not None else {
+                "enabled": False,
+                "running": False,
+                "auth": {"configured": False, "connected": False},
+            },
+        })
+
+    def _sync_unavailable() -> web.Response:
+        return web.json_response(
+            {"error": "OneDrive synchronization is disabled", "enabled": False},
+            status=503,
+        )
+
+    async def sync_status(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if sync_service is None:
+            return web.json_response({
+                "enabled": False,
+                "running": False,
+                "auth": {"configured": False, "connected": False},
+            })
+        return web.json_response(sync_service.describe())
+
+    async def sync_connect(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if sync_service is None:
+            return _sync_unavailable()
+        try:
+            return web.json_response(await sync_service.connect())
+        except Exception as exc:  # noqa: BLE001 - return actionable auth/Graph error
+            return web.json_response({"error": str(exc)}, status=502)
+
+    async def sync_run(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if sync_service is None:
+            return _sync_unavailable()
+        try:
+            return web.json_response(await sync_service.sync_now())
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=502)
+
+    async def sync_disconnect(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if sync_service is None:
+            return _sync_unavailable()
+        try:
+            return web.json_response(await sync_service.disconnect())
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=502)
+
+    async def inbox_list(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        raw_status = request.query.get("status", "")
+        statuses = tuple(value.strip() for value in raw_status.split(",") if value.strip())
+        allowed = {"unread", "seen", "completed", "ignored"}
+        if any(status not in allowed for status in statuses):
+            return web.json_response({"error": "invalid inbox status"}, status=400)
+        try:
+            limit = int(request.query.get("limit", "100"))
+        except ValueError:
+            return web.json_response({"error": "invalid limit"}, status=400)
+        return web.json_response({
+            "unreadCount": store.inbox_unread_count(),
+            "items": store.list_inbox_items(statuses=statuses, limit=limit),
+        })
+
+    async def inbox_update(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+            item = store.update_inbox_item(
+                request.match_info["id"], str(body.get("status") or "")
+            )
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except Exception:  # noqa: BLE001
+            return web.json_response({"error": "invalid json"}, status=400)
+        if item is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response(item)
+
+    async def inbox_mark_all_seen(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"updated": store.mark_all_inbox_seen()})
+
+    async def inbox_scan(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        result = await watcher.scan_once()
+        return web.json_response({
+            "sessionsSeen": result.sessions_seen,
+            "baselined": result.baselined,
+            "notificationsCreated": result.notifications_created,
+            "errors": result.errors,
+            "unreadCount": store.inbox_unread_count(),
+        })
+
     async def sessions_create(request: web.Request) -> web.Response:
         if not _authorized(request, config.CHAT_API_TOKEN):
             return web.json_response({"error": "unauthorized"}, status=401)
@@ -382,6 +669,47 @@ def setup_web_routes(app: web.Application, config, runner):
             return web.json_response({"error": "unauthorized"}, status=401)
         return web.json_response(store.list())
 
+    async def history_list(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        items = [{
+            **session,
+            "conversationId": session["id"],
+            "source": "bridge",
+            "sourceKey": "",
+            "importable": False,
+        } for session in store.list()]
+        for native in copilot_sessions.list_sessions():
+            source = str(native.get("source") or "cli")
+            native_id = str(native.get("nativeId") or native.get("id") or "")
+            if not native_id:
+                continue
+            adapter_id = _adapter_for_native_source(source)
+            if store.find_by_external_ref(adapter_id, native_id) is not None:
+                continue
+            items.append({
+                **native,
+                "conversationId": "",
+                "sourceKey": native.get("sourceKey") or f"{source}:{native_id}",
+                "machineId": store.device_id,
+                "machineName": store.device_name,
+                "importable": True,
+            })
+        items.sort(key=lambda item: float(item.get("updatedAt") or 0), reverse=True)
+        represented: dict[str, str] = {}
+        for item in items:
+            machine_id = str(item.get("machineId") or "")
+            if machine_id:
+                represented[machine_id] = str(item.get("machineName") or machine_id[:8])
+        devices = {item["id"]: item for item in store.list_devices()}
+        machines = [{
+            "id": machine_id,
+            "name": name,
+            "isLocal": bool(devices.get(machine_id, {}).get("isLocal")),
+        } for machine_id, name in represented.items()]
+        machines.sort(key=lambda item: (not item["isLocal"], item["name"].lower(), item["id"]))
+        return web.json_response({"machines": machines, "items": items})
+
     async def sessions_get(request: web.Request) -> web.Response:
         if not _authorized(request, config.CHAT_API_TOKEN):
             return web.json_response({"error": "unauthorized"}, status=401)
@@ -389,6 +717,20 @@ def setup_web_routes(app: web.Application, config, runner):
         if session is None:
             return web.json_response({"error": "not found"}, status=404)
         return web.json_response(session)
+
+    async def sessions_turns(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        cid = request.match_info["id"]
+        if store.get(cid) is None:
+            return web.json_response({"error": "not found"}, status=404)
+        raw_length = request.query.get("previewLength")
+        try:
+            preview_length = int(raw_length) if raw_length is not None else None
+            turns = store.list_turns(cid, preview_length=preview_length)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response(turns)
 
     async def sessions_sync(request: web.Request) -> web.Response:
         """Reconcile a session with the Copilot CLI's own on-disk transcript, then
@@ -405,8 +747,24 @@ def setup_web_routes(app: web.Application, config, runner):
         if not _authorized(request, config.CHAT_API_TOKEN):
             return web.json_response({"error": "unauthorized"}, status=401)
         cid = request.match_info["id"]
+        external_ref = store.external_ref_for_conversation(
+            cid, (
+                "copilot-cli", "vscode-insiders-copilot-chat",
+                "vscode-copilot-chat",
+            )
+        )
+        binding = store.execution_binding_for(cid, "copilot")
+        native_id = (
+            external_ref["nativeSessionId"] if external_ref
+            else binding["nativeSessionId"] if binding
+            else cid
+        )
         try:
-            native = copilot_sessions.read_session(cid)
+            native = copilot_sessions.read_session(
+                native_id,
+                source=_native_source_for_adapter(external_ref["adapterId"])
+                if external_ref else "",
+            )
         except ValueError:
             return web.json_response({"error": "invalid id"}, status=400)
 
@@ -464,15 +822,7 @@ def setup_web_routes(app: web.Application, config, runner):
         return handler
 
     async def _index(request: web.Request):  # noqa: ARG001
-        """Serve index.html with the host's API key injected.
-
-        In the MS edition the Dev Tunnel relay enforces a Microsoft sign-in
-        (owner-only) BEFORE any request reaches this server, so whoever loads this
-        page has already been authenticated by Microsoft. We therefore hand the
-        per-host API key to the page (``window.__CB_KEY``) so the web app works
-        immediately — no manual API-token entry. The key never leaves the
-        Microsoft-authenticated tunnel.
-        """
+        """Serve index.html, injecting a key only for legacy API-key modes."""
         path = os.path.join(WEBAPP_DIR, "index.html")
         if not os.path.isfile(path):
             return web.Response(status=404, text="not found")
@@ -483,7 +833,8 @@ def setup_web_routes(app: web.Application, config, runner):
             # Microsoft sign-in (private/tenant/org). In 'anonymous' mode the key is
             # the only gate, so embedding it would defeat it — require manual entry.
             tunnel_auth = (getattr(config, "TUNNEL_AUTH", "private") or "private").strip().lower()
-            if key and tunnel_auth != "anonymous":
+            auth_mode = (getattr(config, "AUTH_MODE", "tunnel") or "tunnel").strip().lower()
+            if key and tunnel_auth != "anonymous" and auth_mode in ("apikey", "both"):
                 inject = ("<script>window.__CB_KEY="
                           + json.dumps(key) + ";</script>")
                 html = html.replace("</head>", inject + "</head>", 1)
@@ -503,7 +854,7 @@ def setup_web_routes(app: web.Application, config, runner):
         if not _authorized(request, config.CHAT_API_TOKEN):
             return web.json_response({"error": "unauthorized"}, status=401)
         try:
-            data = copilot_sessions.read_session(request.match_info["id"])
+            data = copilot_sessions.read_session_key(request.match_info["id"])
         except ValueError:
             return web.json_response({"error": "invalid id"}, status=400)
         if data is None:
@@ -511,29 +862,40 @@ def setup_web_routes(app: web.Application, config, runner):
         return web.json_response(data)
 
     async def copilot_session_import(request: web.Request) -> web.Response:
-        """Copy a Copilot CLI session into the bridge store under the SAME id, so it
-        appears in the normal session list and the next turn resumes the real
-        Copilot conversation (bridge id == Copilot --session-id). Idempotent."""
+        """Import a native session under a separate Bridge conversation id.
+
+        CLI imports receive a local execution binding to their resumable native
+        id. VS Code imports remain readable history and get a fresh binding only
+        if the user later continues them through a provider.
+        """
         if not _authorized(request, config.CHAT_API_TOKEN):
             return web.json_response({"error": "unauthorized"}, status=401)
-        cid = request.match_info["id"]
+        source_key = request.match_info["id"]
         try:
-            data = copilot_sessions.read_session(cid)
+            data = copilot_sessions.read_session_key(source_key)
         except ValueError:
             return web.json_response({"error": "invalid id"}, status=400)
         if data is None:
             return web.json_response({"error": "not found"}, status=404)
-        try:
-            session = store.get_or_create(cid)
-        except ValueError:
-            return web.json_response({"error": "invalid id"}, status=400)
-        # Only populate on first import so re-importing doesn't duplicate messages.
-        if not session.get("messages"):
-            for m in data.get("messages", []):
-                store.append_message(cid, m.get("role") or "user", m.get("text") or "")
-            if data.get("title"):
-                store.rename(cid, data["title"])
-            session = store.get(cid) or session
+        source = data.get("source") or "cli"
+        native_id = data.get("nativeId") or data.get("id")
+        adapter_id = _adapter_for_native_source(source)
+        session = store.find_by_external_ref(adapter_id, native_id)
+        if session is None:
+            session = store.create(title=data.get("title") or "")
+            store.replace_messages(
+                session["id"], data.get("messages") or [],
+                title=data.get("title") or "", updated_at=data.get("updatedAt"),
+            )
+            store.add_external_ref(
+                session["id"], adapter_id, native_id,
+                capabilities={"canResume": source == "cli"},
+            )
+            if source == "cli":
+                store.get_or_create_execution_binding(
+                    session["id"], "copilot", native_session_id=native_id
+                )
+            session = store.get(session["id"])
         return web.json_response(store.summarize(session), status=201)
 
     # ----- Client-uploaded image serving -----
@@ -563,11 +925,24 @@ def setup_web_routes(app: web.Application, config, runner):
     app.router.add_get("/api/chat/{job_id}", chat_status)
     app.router.add_post("/api/chat-sync", chat_sync)
     app.router.add_get("/api/webconfig", webconfig)
+    app.router.add_get("/api/settings", settings_get)
+    app.router.add_patch("/api/settings", settings_update)
+    app.router.add_get("/api/dashboard", dashboard_get)
+    app.router.add_get("/api/inbox", inbox_list)
+    app.router.add_patch("/api/inbox/{id}", inbox_update)
+    app.router.add_post("/api/inbox/mark-all-seen", inbox_mark_all_seen)
+    app.router.add_post("/api/inbox/scan", inbox_scan)
+    app.router.add_get("/api/sync/status", sync_status)
+    app.router.add_post("/api/sync/connect", sync_connect)
+    app.router.add_post("/api/sync/run", sync_run)
+    app.router.add_post("/api/sync/disconnect", sync_disconnect)
     app.router.add_get("/api/uploads/{sid}/{name}", uploads_get)
 
     # Session management
     app.router.add_post("/api/sessions", sessions_create)
     app.router.add_get("/api/sessions", sessions_list)
+    app.router.add_get("/api/history", history_list)
+    app.router.add_get("/api/sessions/{id}/turns", sessions_turns)
     app.router.add_get("/api/sessions/{id}", sessions_get)
     app.router.add_post("/api/sessions/{id}/sync", sessions_sync)
     app.router.add_delete("/api/sessions/{id}", sessions_delete)

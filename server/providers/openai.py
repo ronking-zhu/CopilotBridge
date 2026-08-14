@@ -39,6 +39,7 @@ class OpenAIProvider(AIProvider):
         new_session: bool = False,
         session_id: str | None = None,
         attachments: list[str] | None = None,
+        history: list[dict] | None = None,
     ) -> AIResult:
         if not self.available:
             return AIResult(
@@ -46,10 +47,14 @@ class OpenAIProvider(AIProvider):
                 text="OpenAI provider needs OPENAI_API_KEY. Set it and AI_PROVIDER=openai.",
                 exit_code=-1,
             )
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-        }
+        messages = []
+        for message in history or []:
+            role = message.get("role")
+            text = message.get("text") or ""
+            if role in ("user", "assistant") and text:
+                messages.append({"role": role, "content": text})
+        messages.append({"role": "user", "content": prompt})
+        payload = {"model": self.model, "messages": messages}
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         # Non-positive timeout = wait as long as needed (parity with the CLIs).
         total = self.timeout if (self.timeout and self.timeout > 0) else None

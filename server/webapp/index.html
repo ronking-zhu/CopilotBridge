@@ -35,6 +35,13 @@
     background:var(--panel2); color:var(--text); border:1px solid var(--border);
     border-radius:8px; padding:7px 10px; font-size:13px; cursor:pointer;
   }
+  header .iconbtn{position:relative; min-width:36px; min-height:34px}
+  .badge{
+    position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 5px;
+    border-radius:9px; background:var(--err); color:#fff; border:2px solid var(--panel);
+    font:700 10px/14px ui-monospace,Menlo,Consolas,monospace; text-align:center;
+  }
+  .badge[hidden]{display:none}
   header button:active{background:#2d333b}
   #log{flex:1; overflow-y:auto; padding:14px 12px 8px; -webkit-overflow-scrolling:touch}
   .msg{margin:10px 0; display:flex}
@@ -121,6 +128,21 @@
   .ssearch{padding:8px 10px; border-bottom:1px solid var(--border)}
   .ssearch input{width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:9px; padding:9px 11px; font:14px/1.3 inherit; -webkit-appearance:none}
   .ssearch input:focus{outline:none; border-color:var(--accent)}
+  .machine-filters{display:flex; gap:6px; padding:8px 10px; overflow-x:auto; border-bottom:1px solid var(--border); scrollbar-width:thin}
+  .machine-filter{flex:0 0 auto; padding:6px 9px; border:1px solid var(--border); border-radius:7px; background:var(--panel2); color:var(--text); font:12px/1.2 inherit; cursor:pointer; white-space:nowrap}
+  .machine-filter.active{background:var(--accent); border-color:var(--accent); color:#fff}
+  .short-filter{display:flex; align-items:center; gap:7px; min-height:38px; padding:7px 10px; border-bottom:1px solid var(--border); color:var(--text); font-size:12px}
+  .short-filter-toggle{display:flex; align-items:center; gap:8px; flex:1; min-width:0; cursor:pointer}
+  .short-filter input[type="checkbox"]{position:absolute; opacity:0; pointer-events:none}
+  .short-filter .track{position:relative; flex:0 0 auto; width:32px; height:18px; border:1px solid var(--border); border-radius:9px; background:var(--bg)}
+  .short-filter .track::after{content:""; position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--muted); transition:transform .15s ease,background .15s ease}
+  .short-filter input[type="checkbox"]:checked + .track{background:var(--accent); border-color:var(--accent)}
+  .short-filter input[type="checkbox"]:checked + .track::after{transform:translateX(14px); background:#fff}
+  .short-filter .label{flex:1; min-width:0}
+  .short-filter .threshold{box-sizing:border-box; flex:0 0 46px; width:46px; height:28px; padding:3px 2px 3px 7px; border:1px solid var(--border); border-radius:7px; background:var(--bg); color:var(--text); font:12px/1 inherit; text-align:center}
+  .short-filter .threshold:focus{outline:none; border-color:var(--accent)}
+  .short-filter .unit{white-space:nowrap}
+  .short-filter .count{color:var(--muted); white-space:nowrap}
   .sitem{display:flex; align-items:center; gap:8px; padding:12px; border-bottom:1px solid var(--border); cursor:pointer}
   .sitem.active{background:var(--panel2)}
   .sitem .stitle{flex:1; min-width:0}
@@ -129,6 +151,71 @@
   .sitem .del{background:none; border:none; color:var(--muted); font-size:16px; padding:4px 6px; cursor:pointer}
   .sitem .del:active{color:var(--err)}
   .sitem .imp{background:none; border:1px solid var(--border); border-radius:7px; color:var(--accent); font-size:12px; padding:5px 9px; cursor:pointer; white-space:nowrap}
+
+  /* prompt timeline */
+  #timeline{
+    position:fixed; top:0; right:0; bottom:0; width:88%; max-width:380px; z-index:15;
+    background:var(--panel); border-left:1px solid var(--border);
+    transform:translateX(100%); transition:transform .22s ease; display:flex; flex-direction:column;
+    padding-top:env(safe-area-inset-top);
+  }
+  #timeline.show{transform:none}
+  #timeline .thead{display:flex; align-items:center; gap:8px; padding:14px 12px; border-bottom:1px solid var(--border)}
+  #timeline .thead h2{font-size:15px; margin:0; flex:1}
+  #timeline .tclose{background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:8px; width:32px; height:32px; cursor:pointer}
+  #tlist{flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch}
+  .titem{display:grid; grid-template-columns:32px minmax(0,1fr); gap:8px; width:100%; padding:12px; border:0; border-bottom:1px solid var(--border); background:transparent; color:var(--text); text-align:left; cursor:pointer}
+  .titem:hover,.titem.active{background:var(--panel2)}
+  .titem .tnum{color:var(--muted); font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; text-align:right}
+  .titem .tpreview{display:block; font:13px/1.45 inherit; overflow-wrap:anywhere}
+  .titem .tmeta{display:block; font-size:11px; color:var(--muted); margin-top:3px}
+  .msg.turn-flash .bubble{animation:turnFlash 1.25s ease-out}
+  @keyframes turnFlash{0%{box-shadow:0 0 0 3px var(--accent)}100%{box-shadow:none}}
+  @media (prefers-reduced-motion:reduce){#drawer,#timeline{transition:none}.msg.turn-flash .bubble{animation:none;outline:2px solid var(--accent)}}
+
+  /* unified inbox / AI dashboard */
+  #inboxDrawer{
+    position:fixed; top:0; right:0; bottom:0; width:92%; max-width:440px; z-index:15;
+    background:var(--panel); border-left:1px solid var(--border);
+    transform:translateX(100%); transition:transform .22s ease; display:flex; flex-direction:column;
+    padding-top:env(safe-area-inset-top);
+  }
+  #inboxDrawer.show{transform:none}
+  #inboxDrawer .ihead{display:flex; align-items:center; gap:8px; padding:14px 12px; border-bottom:1px solid var(--border)}
+  #inboxDrawer .ihead h2{font-size:15px; margin:0; flex:1}
+  #inboxDrawer .iclose{background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:8px; width:32px; height:32px; cursor:pointer}
+  .dashstats{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); border-bottom:1px solid var(--border)}
+  .dashstat{padding:12px 8px; text-align:center; border-right:1px solid var(--border)}
+  .dashstat:last-child{border-right:0}
+  .dashstat strong{display:block; font:700 18px/1.2 ui-monospace,Menlo,Consolas,monospace}
+  .dashstat span{display:block; color:var(--muted); font-size:11px; margin-top:3px}
+  .notification-setup{padding:10px 12px; border-bottom:1px solid var(--border); background:rgba(47,129,247,.1)}
+  .notification-setup strong{display:block; font-size:13px}
+  .notification-setup span{display:block; color:var(--muted); font-size:12px; line-height:1.45; margin-top:3px}
+  .dashactions{display:flex; gap:7px; padding:9px 10px; border-bottom:1px solid var(--border); overflow-x:auto}
+  .dashactions button{background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:7px 9px; font-size:12px; white-space:nowrap; cursor:pointer}
+  .dashactions #enableNotifyBtn.setup-primary{background:var(--accent); color:#fff; border-color:var(--accent)}
+  .syncsetup{padding:10px 12px; border-bottom:1px solid var(--border)}
+  .syncsetup.setup-primary{background:rgba(47,129,247,.1)}
+  .syncsetup strong{display:block; font-size:13px}
+  .syncsetup span{display:block; color:var(--muted); font-size:12px; line-height:1.45; margin-top:3px; overflow-wrap:anywhere}
+  .syncactions{display:flex; flex-wrap:wrap; gap:7px; margin-top:8px}
+  .syncactions button{background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:7px 9px; font-size:12px; cursor:pointer}
+  .syncactions #connectSyncBtn{background:var(--accent); color:#fff; border-color:var(--accent)}
+  #inboxList{flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch}
+  .inbox-section{padding:8px 12px; color:var(--muted); font-size:11px; font-weight:600; text-transform:uppercase; border-bottom:1px solid var(--border)}
+  .jobrow,.inboxitem{display:flex; gap:10px; padding:11px 12px; border-bottom:1px solid var(--border)}
+  .jobrow{align-items:center; cursor:pointer}
+  .jobdot{width:8px; height:8px; flex:0 0 auto; border-radius:50%; background:var(--accent); box-shadow:0 0 0 3px rgba(47,129,247,.18)}
+  .inboxitem{cursor:pointer; background:transparent; color:var(--text)}
+  .inboxitem:hover,.inboxitem.unread{background:var(--panel2)}
+  .sourcepill{flex:0 0 auto; align-self:flex-start; border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:2px 5px; font:10px/1.4 ui-monospace,Menlo,Consolas,monospace}
+  .inboxbody{min-width:0; flex:1}
+  .inboxtitle{display:block; font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .inboxsummary{display:-webkit-box; font-size:12px; color:var(--muted); margin-top:3px; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden}
+  .inboxmeta{display:block; font-size:10px; color:var(--muted); margin-top:5px}
+  .inboxignore{align-self:flex-start; background:none; border:0; color:var(--muted); cursor:pointer; padding:2px 4px}
+  @media (prefers-reduced-motion:reduce){#inboxDrawer{transition:none}}
 
   /* markdown */
   .bubble h1,.bubble h2,.bubble h3,.bubble h4{margin:.5em 0 .3em; line-height:1.25}
@@ -150,17 +237,58 @@
   <button id="menuBtn" title="会话列表" aria-label="会话列表">☰</button>
   <span class="logo">&gt;_</span>
   <h1>Copilot Bridge</h1>
-  <button id="setBtn" title="设置">⚙</button>
+  <button class="iconbtn" id="inboxBtn" title="AI Dashboard" aria-label="AI Dashboard">●<span class="badge" id="inboxBadge" hidden></span></button>
+  <button class="iconbtn" id="timelineBtn" title="输入时间线" aria-label="输入时间线">☷</button>
+  <button class="iconbtn" id="setBtn" title="设置">⚙</button>
 </header>
 
 <div id="scrim"></div>
 <aside id="drawer">
   <div class="dhead">
     <h2>会话</h2>
-    <button class="dnew dghost" id="importBtn" title="从 Copilot 导入历史会话">📥 Copilot</button>
+    <button class="dnew dghost" id="importBtn" title="查看全部机器的会话历史">History</button>
     <button class="dnew" id="newBtn">＋ 新会话</button>
   </div>
   <div id="slist"></div>
+</aside>
+
+<aside id="timeline" aria-label="输入时间线">
+  <div class="thead">
+    <h2>输入时间线</h2>
+    <button class="tclose" id="timelineClose" title="关闭" aria-label="关闭">×</button>
+  </div>
+  <div id="tlist"></div>
+</aside>
+
+<aside id="inboxDrawer" aria-label="AI Dashboard">
+  <div class="ihead">
+    <h2>AI Dashboard</h2>
+    <button class="iclose" id="inboxClose" title="关闭" aria-label="关闭">×</button>
+  </div>
+  <div class="dashstats">
+    <div class="dashstat"><strong id="unreadStat">0</strong><span>待查看</span></div>
+    <div class="dashstat"><strong id="runningStat">0</strong><span>正在运行</span></div>
+    <div class="dashstat"><strong id="watchedStat">0</strong><span>监控会话</span></div>
+  </div>
+  <div class="notification-setup" id="notificationSetupNotice" hidden>
+    <strong>开启 AI 回复提醒</strong>
+    <span id="notificationSetupMessage">点击“允许浏览器通知”，然后在 Edge 的提示中选择“允许”。</span>
+  </div>
+  <div class="dashactions">
+    <button id="scanInboxBtn" type="button">立即扫描</button>
+    <button id="markInboxSeenBtn" type="button">全部已读</button>
+    <button id="enableNotifyBtn" type="button">允许浏览器通知</button>
+  </div>
+  <div class="syncsetup" id="syncSetupPanel">
+    <strong>OneDrive 会话同步</strong>
+    <span id="syncStatusMessage">正在读取同步状态…</span>
+    <div class="syncactions">
+      <button id="connectSyncBtn" type="button">连接 OneDrive</button>
+      <button id="runSyncBtn" type="button" hidden>立即同步</button>
+      <button id="disconnectSyncBtn" type="button" hidden>断开</button>
+    </div>
+  </div>
+  <div id="inboxList"></div>
 </aside>
 
 <div id="log"></div>
@@ -193,11 +321,14 @@
       <input id="tokenInput" type="password" placeholder="粘贴 .env 里的 CHAT_API_TOKEN">
     </div>
 
+    <label>输入时间线预览字符数</label>
+    <input id="previewLengthInput" type="number" min="20" max="1000" step="10" inputmode="numeric">
+
     <div class="row">
       <button id="cancelBtn" type="button">取消</button>
       <button id="saveBtn" type="button" class="primary">保存</button>
     </div>
-      <div class="hint">指令会在你的电脑上由 Copilot CLI 执行（默认限制在 workspace/ 沙箱）。打开本页前已经过了 Microsoft 登录（Dev Tunnel），Token 已自动填入，通常无需手动粘贴。</div>
+      <div class="hint">本机 localhost 无需登录；通过 Dev Tunnel 远程访问时，Microsoft 登录会在打开本页前完成。</div>
   </div>
 </div>
 
@@ -206,13 +337,32 @@
 const $ = s => document.querySelector(s);
 const log = $('#log'), input = $('#input'), form = $('#form'), sendBtn = $('#send');
 const drawer = $('#drawer'), scrim = $('#scrim'), slist = $('#slist');
+const timeline = $('#timeline'), tlist = $('#tlist');
+const inboxDrawer = $('#inboxDrawer'), inboxList = $('#inboxList'), inboxBadge = $('#inboxBadge');
 const fileInput = $('#fileInput'), previews = $('#previews'), attachBtn = $('#attachBtn');
 
 let base  = (localStorage.getItem('cb_base')  || location.origin).replace(/\/$/,'');
 let token = localStorage.getItem('cb_token') || window.__CB_KEY || '';
-let sid   = localStorage.getItem('cb_sid') || '';
+const initialParams = new URLSearchParams(location.search);
+let sid   = initialParams.get('conversation') || localStorage.getItem('cb_sid') || '';
+let initialTurnId = initialParams.get('turn') || '';
 let sessions = [];
-let copilotSessions = [];   // cache of the Copilot-CLI native list, for client-side search
+let turns = [];
+let appSettings = { promptPreviewLength: 200 };
+let dashboardState = null;
+let dashboardInitialized = false;
+let knownInboxIds = new Set();
+let dashboardTimer = null;
+let syncBusy = false;
+let syncBusyMessage = '';
+let historyItems = [];
+let historyMachines = [];
+let historyMachine = '';
+let historyQuery = '';
+const storedShortSessionPrompts = Number.parseInt(localStorage.getItem('cb_short_session_prompts') || '2', 10);
+let shortSessionPrompts = Number.isFinite(storedShortSessionPrompts)
+  ? Math.min(99, Math.max(0, storedShortSessionPrompts)) : 2;
+let hideShortSessions = localStorage.getItem('cb_hide_short_sessions') !== 'false';
 let pending = [];           // images picked but not yet sent: [{name, mime, dataUrl, b64}]
 
 // Microsoft Entra ID sign-in (optional; driven by /api/webconfig). When the user
@@ -241,9 +391,10 @@ async function api(method, path, body){
   if(body !== undefined) opt.body = JSON.stringify(body);
   const r = await fetch(base + path, opt);
   if(r.status === 401){ openModal(); throw new Error('unauthorized'); }
-  if(!r.ok) throw new Error('HTTP ' + r.status);
   const ct = r.headers.get('content-type') || '';
-  return ct.includes('json') ? r.json() : r.text();
+  const result = ct.includes('json') ? await r.json() : await r.text();
+  if(!r.ok) throw new Error((result && result.error) || ('HTTP ' + r.status));
+  return result;
 }
 
 /* ---------- markdown (GFM subset, matches the native clients) ---------- */
@@ -307,9 +458,10 @@ function mdToHtml(src){
 }
 
 /* ---------- messages ---------- */
-function addMsg(kind, text, images){
+function addMsg(kind, text, images, turnId){
   const wrap = document.createElement('div');
   wrap.className = 'msg ' + kind;
+  if(turnId) wrap.dataset.turnId = turnId;
   const b = document.createElement('div');
   b.className = 'bubble';
   let html = '';
@@ -424,10 +576,58 @@ function relTime(ts){
   if(d < 86400) return Math.floor(d/3600) + ' 小时前';
   return Math.floor(d/86400) + ' 天前';
 }
+function sessionPromptCount(session){
+  const exact = Number(session && session.promptCount);
+  if(Number.isFinite(exact)) return Math.max(0, exact);
+  return Math.ceil(Math.max(0, Number(session && session.messageCount) || 0) / 2);
+}
+function isShortSession(session){ return sessionPromptCount(session) <= shortSessionPrompts; }
+function shortFilterControl(candidates, onChange){
+  const control = document.createElement('div');
+  control.className = 'short-filter';
+  control.title = '按用户提问次数隐藏短会话；不会删除数据';
+  control.innerHTML = '<label class="short-filter-toggle"><input type="checkbox">'
+    + '<span class="track" aria-hidden="true"></span><span class="label">隐藏不超过</span></label>'
+    + '<input class="threshold" type="number" min="0" max="99" step="1" inputmode="numeric">'
+    + '<span class="unit">轮问答</span><span class="count"></span>';
+  const checkbox = control.querySelector('input[type="checkbox"]');
+  const threshold = control.querySelector('.threshold');
+  checkbox.checked = hideShortSessions;
+  checkbox.setAttribute('aria-label', '隐藏短会话');
+  threshold.value = String(shortSessionPrompts);
+  threshold.setAttribute('aria-label', '短会话问答次数阈值');
+  const updateCount = ()=>{
+    const hidden = candidates.filter(session => isShortSession(session)
+      && (session.conversationId || session.id) !== sid).length;
+    control.querySelector('.count').textContent = hideShortSessions ? '已隐藏 ' + hidden : '显示全部';
+  };
+  updateCount();
+  checkbox.onchange = ()=>{
+    hideShortSessions = checkbox.checked;
+    localStorage.setItem('cb_hide_short_sessions', hideShortSessions ? 'true' : 'false');
+    updateCount();
+    onChange();
+  };
+  threshold.onchange = ()=>{
+    const parsed = Number.parseInt(threshold.value, 10);
+    shortSessionPrompts = Number.isFinite(parsed) ? Math.min(99, Math.max(0, parsed)) : 2;
+    threshold.value = String(shortSessionPrompts);
+    localStorage.setItem('cb_short_session_prompts', String(shortSessionPrompts));
+    updateCount();
+    onChange();
+  };
+  return control;
+}
 function renderSessions(){
   slist.innerHTML = '';
   if(!sessions.length){ slist.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:13px">还没有会话，点上面「新会话」开始。</div>'; return; }
-  for(const s of sessions){
+  slist.appendChild(shortFilterControl(sessions, renderSessions));
+  const visible = sessions.filter(s => !hideShortSessions || s.id === sid || !isShortSession(s));
+  if(!visible.length){
+    slist.insertAdjacentHTML('beforeend', '<div class="snote">没有较长的会话；关闭上方筛选可查看全部。</div>');
+    return;
+  }
+  for(const s of visible){
     const item = document.createElement('div');
     item.className = 'sitem' + (s.id === sid ? ' active' : '');
     const title = (s.title && s.title.trim()) ? s.title : '未命名会话';
@@ -446,69 +646,384 @@ async function loadSessions(){
   renderSessions();
 }
 
-/* ---------- import from Copilot CLI native sessions ---------- */
+/* ---------- prompt timeline ---------- */
+function updateLocation(turnId){
+  const url = new URL(location.href);
+  if(sid) url.searchParams.set('conversation', sid); else url.searchParams.delete('conversation');
+  if(turnId) url.searchParams.set('turn', turnId); else url.searchParams.delete('turn');
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+}
+function renderTimeline(activeTurnId){
+  tlist.innerHTML = '';
+  if(!turns.length){
+    tlist.innerHTML = '<div class="snote">这个会话还没有用户输入。</div>';
+    return;
+  }
+  for(const turn of turns){
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'titem' + (turn.id === activeTurnId ? ' active' : '');
+    const number = document.createElement('span');
+    number.className = 'tnum';
+    number.textContent = String(turn.ordinal).padStart(2, '0');
+    const body = document.createElement('span');
+    const preview = document.createElement('span');
+    preview.className = 'tpreview';
+    preview.textContent = turn.previewText || '(空输入)';
+    const meta = document.createElement('span');
+    meta.className = 'tmeta';
+    meta.textContent = relTime(turn.createdAt) + ' · ' + (turn.messageCount || 0) + ' 条';
+    body.append(preview, meta);
+    item.append(number, body);
+    item.onclick = ()=> goToTurn(turn.id);
+    tlist.appendChild(item);
+  }
+}
+async function loadTimeline(activeTurnId){
+  if(!sid){ turns = []; renderTimeline(); return; }
+  try{
+    turns = await api('GET','/api/sessions/' + encodeURIComponent(sid) + '/turns') || [];
+    renderTimeline(activeTurnId);
+  }catch(e){
+    turns = [];
+    tlist.innerHTML = '<div class="snote">读取输入时间线失败：' + esc(e.message) + '</div>';
+  }
+}
+function findTurnElement(turnId){
+  return [...log.querySelectorAll('.msg[data-turn-id]')]
+    .find(el => el.dataset.turnId === turnId && el.classList.contains('user'))
+    || [...log.querySelectorAll('.msg[data-turn-id]')].find(el => el.dataset.turnId === turnId);
+}
+async function goToTurn(turnId){
+  let target = findTurnElement(turnId);
+  if(!target){ await openSession(sid, turnId); return; }
+  closeTimeline();
+  target.scrollIntoView({ behavior:'smooth', block:'start' });
+  target.classList.remove('turn-flash');
+  void target.offsetWidth;
+  target.classList.add('turn-flash');
+  setTimeout(()=>target.classList.remove('turn-flash'), 1400);
+  renderTimeline(turnId);
+  updateLocation(turnId);
+}
+async function openTimeline(){
+  closeDrawer(); closeInbox();
+  timeline.classList.add('show'); scrim.classList.add('show');
+  const active = new URLSearchParams(location.search).get('turn') || '';
+  await loadTimeline(active);
+}
+function closeTimeline(){
+  timeline.classList.remove('show');
+  if(!drawer.classList.contains('show') && !inboxDrawer.classList.contains('show')) scrim.classList.remove('show');
+}
+$('#timelineBtn').onclick = openTimeline;
+$('#timelineClose').onclick = closeTimeline;
+
+/* ---------- unified inbox / AI dashboard ---------- */
+function sourceLabel(source){
+  if(source === 'vscode-insiders') return 'VS INSIDERS';
+  if(source === 'vscode') return 'VS CODE';
+  if(source === 'cli') return 'CLI';
+  if(source === 'bridge') return 'BRIDGE';
+  return String(source || 'AI').toUpperCase();
+}
+function updateNotificationButton(){
+  const btn = $('#enableNotifyBtn');
+  const notice = $('#notificationSetupNotice');
+  const message = $('#notificationSetupMessage');
+  const setupRequested = initialParams.get('notificationSetup') === '1';
+  btn.classList.remove('setup-primary');
+  if(!('Notification' in window)){
+    btn.textContent='通知不可用'; btn.disabled=true;
+    if(setupRequested){ notice.hidden=false; message.textContent='当前浏览器不支持桌面通知。'; }
+    return;
+  }
+  if(Notification.permission === 'granted'){
+    btn.textContent='桌面通知已启用'; btn.disabled=true;
+    if(setupRequested){ notice.hidden=false; message.textContent='通知已启用，可以关闭此页面。'; }
+  }else if(Notification.permission === 'denied'){
+    btn.textContent='通知已被浏览器阻止'; btn.disabled=true; notice.hidden=false;
+    message.textContent='请点击 Edge 地址栏左侧的站点信息，将“通知”改为“允许”，然后刷新页面。';
+  }else{
+    btn.textContent='允许浏览器通知'; btn.disabled=false;
+    if(setupRequested){ notice.hidden=false; btn.classList.add('setup-primary'); }
+  }
+}
+async function requestBrowserNotifications(){
+  if(!('Notification' in window)) return;
+  try{ await Notification.requestPermission(); }catch(_){ }
+  updateNotificationButton();
+}
+async function showInboxNotification(item){
+  if(!('Notification' in window) || Notification.permission !== 'granted') return;
+  const path = item.conversationId
+    ? '/?conversation=' + encodeURIComponent(item.conversationId)
+    : '/?dashboard=1';
+  const options = {
+    body: sourceLabel(item.source) + ' · ' + (item.summary || 'AI response completed'),
+    tag: 'copilot-bridge-' + item.id,
+    data: { url: path },
+  };
+  try{
+    const registration = await navigator.serviceWorker.ready;
+    await registration.showNotification(item.title || 'AI response completed', options);
+  }catch(_){
+    try{
+      const notification = new Notification(item.title || 'AI response completed', options);
+      notification.onclick = ()=>{ window.focus(); location.href = path; };
+    }catch(__){ }
+  }
+}
+function renderSyncStatus(sync){
+  sync = sync || {enabled:false,auth:{configured:false,connected:false}};
+  const panel=$('#syncSetupPanel'), message=$('#syncStatusMessage');
+  const connect=$('#connectSyncBtn'), run=$('#runSyncBtn'), disconnect=$('#disconnectSyncBtn');
+  const auth=sync.auth || {};
+  const localMode=auth.mode === 'local-folder';
+  const setupRequested=initialParams.get('syncSetup') === '1';
+  panel.classList.toggle('setup-primary', setupRequested && !auth.connected);
+  connect.hidden=!!auth.connected || !sync.enabled;
+  run.hidden=!auth.connected;
+  disconnect.hidden=!auth.connected;
+  connect.disabled=run.disabled=disconnect.disabled=syncBusy || !!sync.running;
+  if(syncBusy){ message.textContent=syncBusyMessage; return; }
+  if(!sync.enabled){ message.textContent='此版本未启用 OneDrive 同步。'; return; }
+  if(!auth.configured){ message.textContent='发布者尚未配置 OneDrive Public Client。'; connect.disabled=true; return; }
+  if(sync.running){ message.textContent='正在先上传本机会话，再下载并合并其他设备的会话…'; return; }
+  if(!auth.connected && localMode){
+    connect.textContent='启用本机 OneDrive';
+    message.textContent='使用本机已登录的 OneDrive 文件夹：' + auth.root + '。启用后先上传本机会话，再下载其他电脑的历史。';
+    return;
+  }
+  if(!auth.connected){
+    message.textContent='连接后会先导入并上传这台电脑已有的 CLI/VS Code 会话，再下载其他电脑的历史，不会覆盖任一侧。';
+    return;
+  }
+  const result=sync.lastResult || {};
+  const parts=[auth.username || 'Microsoft 账号已连接'];
+  if(sync.lastSuccess) parts.push('同步于' + relTime(sync.lastSuccess));
+  if(result.importedNativeSessions) parts.push('导入本机 ' + result.importedNativeSessions);
+  if(result.pushedEventCount) parts.push('上传 ' + result.pushedEventCount);
+  if(result.pulledEventCount) parts.push('下载 ' + result.pulledEventCount);
+  if(sync.pendingEventCount) parts.push('待上传 ' + sync.pendingEventCount);
+  if(sync.lastError) parts.push('错误：' + sync.lastError);
+  message.textContent=parts.join(' · ');
+}
+function renderDashboard(){
+  const state = dashboardState || { unreadCount:0, runningJobCount:0, activeJobs:[], inbox:[], watcher:{} };
+  $('#unreadStat').textContent = state.unreadCount || 0;
+  $('#runningStat').textContent = state.runningJobCount || 0;
+  $('#watchedStat').textContent = (state.watcher && state.watcher.sessionsSeen) || 0;
+  const unread = state.unreadCount || 0;
+  inboxBadge.hidden = unread === 0;
+  inboxBadge.textContent = unread > 99 ? '99+' : String(unread);
+  inboxList.innerHTML = '';
+  if(state.activeJobs && state.activeJobs.length){
+    const heading=document.createElement('div'); heading.className='inbox-section'; heading.textContent='正在运行'; inboxList.appendChild(heading);
+    for(const job of state.activeJobs){
+      const row=document.createElement('div'); row.className='jobrow';
+      const dot=document.createElement('span'); dot.className='jobdot';
+      const body=document.createElement('div'); body.className='inboxbody';
+      const title=document.createElement('div'); title.className='inboxtitle'; title.textContent=job.title || 'Untitled conversation';
+      const meta=document.createElement('div'); meta.className='inboxmeta'; meta.textContent=(job.status === 'queued' ? '排队中' : 'AI 正在处理') + ' · ' + relTime(job.createdAt);
+      body.append(title,meta); row.append(dot,body);
+      row.onclick=()=>{ if(job.conversationId) openSession(job.conversationId); };
+      inboxList.appendChild(row);
+    }
+  }
+  const heading=document.createElement('div'); heading.className='inbox-section'; heading.textContent='最近回复'; inboxList.appendChild(heading);
+  if(!state.inbox || !state.inbox.length){
+    const empty=document.createElement('div'); empty.className='snote'; empty.textContent='还没有新的 AI 回复。'; inboxList.appendChild(empty);
+  }else{
+    for(const item of state.inbox){
+      const row=document.createElement('div'); row.className='inboxitem ' + (item.status === 'unread' ? 'unread' : ''); row.tabIndex=0; row.setAttribute('role','button');
+      const source=document.createElement('span'); source.className='sourcepill'; source.textContent=sourceLabel(item.source);
+      const body=document.createElement('span'); body.className='inboxbody';
+      const title=document.createElement('span'); title.className='inboxtitle'; title.textContent=item.title || 'Untitled conversation';
+      const summary=document.createElement('span'); summary.className='inboxsummary'; summary.textContent=item.summary || '(no text)';
+      const meta=document.createElement('span'); meta.className='inboxmeta'; meta.textContent=relTime(item.createdAt) + (item.status === 'unread' ? ' · 未读' : ' · 已查看');
+      body.append(title,summary,meta);
+      const ignore=document.createElement('button'); ignore.type='button'; ignore.className='inboxignore'; ignore.title='忽略'; ignore.textContent='×';
+      ignore.onclick=async e=>{ e.stopPropagation(); await api('PATCH','/api/inbox/'+encodeURIComponent(item.id),{status:'ignored'}); await loadDashboard(false); };
+      row.append(source,body,ignore);
+      row.onclick=()=>openInboxItem(item);
+      row.onkeydown=e=>{ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); openInboxItem(item); } };
+      inboxList.appendChild(row);
+    }
+  }
+  updateNotificationButton();
+  renderSyncStatus(state.sync);
+}
+async function loadDashboard(notifyNew=true){
+  try{
+    const state=await api('GET','/api/dashboard');
+    const incoming=(state.inbox || []).filter(item=>item.status === 'unread' && !knownInboxIds.has(item.id));
+    if(dashboardInitialized && notifyNew && document.visibilityState !== 'visible'){
+      for(const item of incoming) await showInboxNotification(item);
+    }
+    knownInboxIds=new Set((state.inbox || []).map(item=>item.id));
+    dashboardInitialized=true; dashboardState=state; renderDashboard();
+  }catch(_){ }
+}
+async function openInboxItem(item){
+  try{ await api('PATCH','/api/inbox/'+encodeURIComponent(item.id),{status:'seen'}); }catch(_){ }
+  closeInbox();
+  if(item.conversationId) await openSession(item.conversationId);
+  else if(item.sourceKey) await importCopilot(item.sourceKey);
+  await loadDashboard(false);
+}
+async function openInbox(){
+  closeDrawer(); closeTimeline();
+  inboxDrawer.classList.add('show'); scrim.classList.add('show');
+  await loadDashboard(false);
+}
+function closeInbox(){
+  inboxDrawer.classList.remove('show');
+  if(!drawer.classList.contains('show') && !timeline.classList.contains('show')) scrim.classList.remove('show');
+}
+$('#inboxBtn').onclick=openInbox;
+$('#inboxClose').onclick=closeInbox;
+$('#enableNotifyBtn').onclick=requestBrowserNotifications;
+async function runSyncAction(path, pendingText){
+  if(syncBusy) return;
+  syncBusy=true;
+  syncBusyMessage=pendingText;
+  renderSyncStatus(dashboardState && dashboardState.sync);
+  let failure='';
+  try{
+    const state=await api('POST',path);
+    if(dashboardState) dashboardState.sync=state;
+    await loadSessions();
+    await loadDashboard(false);
+  }catch(e){
+    failure='同步失败：' + e.message;
+  }finally{
+    syncBusy=false;
+    syncBusyMessage='';
+    renderSyncStatus(dashboardState && dashboardState.sync);
+    if(failure) $('#syncStatusMessage').textContent=failure;
+  }
+}
+$('#connectSyncBtn').onclick=()=>runSyncAction('/api/sync/connect','请在打开的 Microsoft 登录窗口中完成授权…');
+$('#runSyncBtn').onclick=()=>runSyncAction('/api/sync/run','正在先上传本机变化，再下载其他设备的变化…');
+$('#disconnectSyncBtn').onclick=()=>runSyncAction('/api/sync/disconnect','正在断开 OneDrive；本地会话不会删除…');
+$('#connectSyncBtn').onclick=()=>{
+  const auth=dashboardState && dashboardState.sync && dashboardState.sync.auth || {};
+  const pending=auth.mode === 'local-folder'
+    ? '正在启用本机 OneDrive 文件夹并执行首次同步…'
+    : '请在打开的 Microsoft 登录窗口中完成授权…';
+  runSyncAction('/api/sync/connect',pending);
+};
+$('#markInboxSeenBtn').onclick=async()=>{ await api('POST','/api/inbox/mark-all-seen'); await loadDashboard(false); };
+$('#scanInboxBtn').onclick=async()=>{
+  const btn=$('#scanInboxBtn'); btn.disabled=true;
+  try{ await api('POST','/api/inbox/scan'); await loadDashboard(true); }
+  finally{ btn.disabled=false; }
+};
+
+/* ---------- unified machine-aware history ---------- */
 function shortRepo(s){
   if(s.repository) return s.repository;
   if(s.cwd){ const parts = s.cwd.replace(/[\\/]+$/,'').split(/[\\/]/); return parts[parts.length-1] || s.cwd; }
   return '';
 }
-function renderCopilotSessions(list){
-  copilotSessions = list || [];
+function renderHistory(data){
+  historyItems = (data && data.items) || [];
+  historyMachines = (data && data.machines) || [];
+  historyMachine = '';
+  historyQuery = '';
   slist.innerHTML = '';
   const back = document.createElement('div');
   back.className = 'sback';
-  back.innerHTML = '← 返回本地会话';
+  back.innerHTML = '← 返回会话';
   back.onclick = ()=> loadSessions();
   slist.appendChild(back);
   const note = document.createElement('div');
   note.className = 'snote';
-  note.textContent = '这些是电脑上 Copilot CLI 的历史会话，点「导入」即可加载它的全部对话。';
+  note.textContent = '显示全部机器的会话；选择机器名可筛选。尚未进入 Bridge 的本机会话仍可直接导入。';
   slist.appendChild(note);
-  // Search box: filters by title + repo/folder. Only the #cplist below re-renders
-  // on each keystroke, so the input keeps focus while typing.
+  const filters = document.createElement('div');
+  filters.id = 'machineFilters';
+  filters.className = 'machine-filters';
+  slist.appendChild(filters);
+  const quality = document.createElement('div');
+  quality.id = 'historyQualityFilter';
+  slist.appendChild(quality);
   const box = document.createElement('div');
   box.className = 'ssearch';
-  box.innerHTML = '<input id="cpsearch" type="search" placeholder="🔍 搜索会话（标题 / 仓库）" autocomplete="off" autocapitalize="off" autocorrect="off">';
+  box.innerHTML = '<input id="historySearch" type="search" placeholder="搜索机器 / 会话 / 仓库" autocomplete="off" autocapitalize="off" autocorrect="off">';
   slist.appendChild(box);
   const wrap = document.createElement('div');
-  wrap.id = 'cplist';
+  wrap.id = 'historyList';
   slist.appendChild(wrap);
-  const input = box.querySelector('#cpsearch');
-  input.addEventListener('input', ()=> renderCopilotItems(input.value));
-  renderCopilotItems('');
+  const input = box.querySelector('#historySearch');
+  input.addEventListener('input', ()=>{ historyQuery=input.value; renderHistoryItems(); });
+  renderMachineFilters();
+  renderHistoryQualityFilter();
+  renderHistoryItems();
 }
-function renderCopilotItems(query){
-  const wrap = document.getElementById('cplist');
+function renderMachineFilters(){
+  const wrap = document.getElementById('machineFilters');
   if(!wrap) return;
   wrap.innerHTML = '';
-  if(!copilotSessions.length){ wrap.innerHTML = '<div class="snote">没有发现 Copilot 会话。</div>'; return; }
-  const q = (query || '').trim().toLowerCase();
-  const srcLabel = s => s.source === 'vscode' ? 'vscode vs code' : (s.source === 'cli' ? 'cli' : '');
-  const items = q
-    ? copilotSessions.filter(s => ((s.title || '') + ' ' + shortRepo(s) + ' ' + srcLabel(s)).toLowerCase().includes(q))
-    : copilotSessions;
-  if(!items.length){ wrap.innerHTML = '<div class="snote">没有匹配「' + esc(query) + '」的会话。</div>'; return; }
+  const choices = [{id:'',name:'All'}, ...historyMachines];
+  for(const machine of choices){
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'machine-filter' + (historyMachine === machine.id ? ' active' : '');
+    button.textContent = machine.name;
+    button.onclick = ()=>{
+      historyMachine = machine.id;
+      renderMachineFilters();
+      renderHistoryQualityFilter();
+      renderHistoryItems();
+    };
+    wrap.appendChild(button);
+  }
+}
+function renderHistoryQualityFilter(){
+  const wrap = document.getElementById('historyQualityFilter');
+  if(!wrap) return;
+  const candidates = historyItems.filter(s => !historyMachine || s.machineId === historyMachine);
+  wrap.replaceChildren(shortFilterControl(candidates, renderHistoryItems));
+}
+function renderHistoryItems(){
+  const wrap = document.getElementById('historyList');
+  if(!wrap) return;
+  wrap.innerHTML = '';
+  if(!historyItems.length){ wrap.innerHTML = '<div class="snote">没有发现历史会话。</div>'; return; }
+  const q = historyQuery.trim().toLowerCase();
+  const srcLabel = s => String(s.source || '').startsWith('vscode') ? 'vscode vs code insiders' : (s.source === 'cli' ? 'cli' : '');
+  const items = historyItems.filter(s =>{
+    if(historyMachine && s.machineId !== historyMachine) return false;
+    if(hideShortSessions && s.conversationId !== sid && isShortSession(s)) return false;
+    if(!q) return true;
+    return ((s.machineName || '') + ' ' + (s.title || '') + ' ' + shortRepo(s) + ' ' + srcLabel(s)).toLowerCase().includes(q);
+  });
+  if(!items.length){ wrap.innerHTML = '<div class="snote">当前筛选条件下没有会话。</div>'; return; }
   for(const s of items){
     const item = document.createElement('div');
-    item.className = 'sitem' + (s.id === sid ? ' active' : '');
+    item.className = 'sitem' + (s.conversationId === sid ? ' active' : '');
     const title = (s.title && s.title.trim()) ? s.title : '未命名会话';
+    const machine = s.machineName || 'Unknown device';
     const repo = shortRepo(s);
-    const src = s.source === 'vscode' ? 'VS Code · ' : (s.source === 'cli' ? 'CLI · ' : '');
+    const src = s.source === 'vscode-insiders' ? 'VS Code Insiders'
+      : (s.source === 'vscode' ? 'VS Code' : (s.source === 'cli' ? 'CLI' : 'Bridge'));
     item.innerHTML = '<div class="stitle"><div class="t"></div><div class="sub"></div></div>'
-      + '<button class="imp">导入</button>';
-    item.querySelector('.t').textContent = title;
-    item.querySelector('.sub').textContent = src + (repo ? repo + ' · ' : '') + relTime(s.updatedAt) + ' · ' + (s.messageCount||0) + ' 条';
-    const go = ()=> importCopilot(s.id);
+      + (s.importable ? '<button class="imp">导入</button>' : '');
+    item.querySelector('.t').textContent = machine + ' - ' + title;
+    item.querySelector('.sub').textContent = [src, repo, relTime(s.updatedAt), (s.messageCount||0) + ' 条'].filter(Boolean).join(' · ');
+    const go = ()=> s.importable ? importCopilot(s.sourceKey || s.id) : openSession(s.conversationId);
     item.querySelector('.stitle').onclick = go;
-    item.querySelector('.imp').onclick = (e)=>{ e.stopPropagation(); go(); };
+    const importButton = item.querySelector('.imp');
+    if(importButton) importButton.onclick = (e)=>{ e.stopPropagation(); go(); };
     wrap.appendChild(item);
   }
 }
-async function loadCopilotSessions(){
-  slist.innerHTML = '<div class="snote">正在扫描 Copilot 会话…</div>';
+async function loadHistory(){
+  slist.innerHTML = '<div class="snote">正在读取全部机器的历史会话…</div>';
   try{
-    const list = await api('GET','/api/copilot-sessions') || [];
-    renderCopilotSessions(list);
+    renderHistory(await api('GET','/api/history') || {machines:[],items:[]});
   }catch(e){
     slist.innerHTML = '<div class="snote">读取失败：' + esc(e.message) + '</div>';
   }
@@ -521,7 +1036,7 @@ async function importCopilot(id){
     await openSession(sid);     // load + render its full transcript
   }catch(e){ alert('导入失败：' + e.message); }
 }
-async function openSession(id){
+async function openSession(id, turnToReveal){
   try{
     // Re-sync from the server on (re)select: this merges any turns made by
     // talking to Copilot directly on the host into the server store, so the
@@ -537,10 +1052,22 @@ async function openSession(id){
       for(const m of s.messages){
         const kind = m.role === 'user' ? 'user' : (m.ok === false ? 'err' : 'bot');
         const imgs = (m.attachments || []).filter(a => a && a.url).map(a => ({ src: attUrl(a), name: a.name }));
-        addMsg(kind, m.text || '', imgs);
+        addMsg(kind, m.text || '', imgs, m.turnId);
       }
     }
-    renderSessions(); closeDrawer();
+    renderSessions(); closeDrawer(); closeTimeline(); closeInbox();
+    await loadTimeline(turnToReveal);
+    updateLocation(turnToReveal || '');
+    if(turnToReveal){
+      requestAnimationFrame(()=>{
+        const target = findTurnElement(turnToReveal);
+        if(target){
+          target.scrollIntoView({ block:'start' });
+          target.classList.add('turn-flash');
+          setTimeout(()=>target.classList.remove('turn-flash'), 1400);
+        }
+      });
+    }
   }catch(e){ addMsg('err','打开会话失败：' + e.message); }
 }
 async function newSession(){
@@ -548,7 +1075,8 @@ async function newSession(){
     const s = await api('POST','/api/sessions', { title: '' });
     sid = s.id; localStorage.setItem('cb_sid', sid);
     await loadSessions();
-    log.innerHTML = ''; addMsg('bot','已开始新会话 ✨'); closeDrawer();
+    turns = []; renderTimeline();
+    log.innerHTML = ''; addMsg('bot','已开始新会话 ✨'); closeDrawer(); closeTimeline(); closeInbox(); updateLocation('');
   }catch(e){ addMsg('err','新建会话失败：' + e.message); }
 }
 async function delSession(id, title){
@@ -572,12 +1100,15 @@ async function ensureSession(){
 }
 
 /* ---------- drawer ---------- */
-function openDrawer(){ drawer.classList.add('show'); scrim.classList.add('show'); loadSessions(); }
-function closeDrawer(){ drawer.classList.remove('show'); scrim.classList.remove('show'); }
+function openDrawer(){ closeTimeline(); closeInbox(); drawer.classList.add('show'); scrim.classList.add('show'); loadSessions(); }
+function closeDrawer(){
+  drawer.classList.remove('show');
+  if(!timeline.classList.contains('show') && !inboxDrawer.classList.contains('show')) scrim.classList.remove('show');
+}
 $('#menuBtn').onclick = openDrawer;
-scrim.onclick = closeDrawer;
+scrim.onclick = ()=>{ closeDrawer(); closeTimeline(); closeInbox(); };
 $('#newBtn').onclick = newSession;
-$('#importBtn').onclick = loadCopilotSessions;
+$('#importBtn').onclick = loadHistory;
 
 /* ---------- send ---------- */
 async function poll(jobId, thinking){
@@ -604,7 +1135,12 @@ async function send(text){
     const res = await poll(start.jobId, thinking);
     thinking._stop(); thinking.remove();
     addMsg(res.ok === false ? 'err' : 'bot', res.reply || '(无输出)');
+    if(res.inboxItemId && document.visibilityState === 'visible'){
+      try{ await api('PATCH','/api/inbox/'+encodeURIComponent(res.inboxItemId),{status:'seen'}); }catch(_){ }
+    }
     loadSessions();   // refresh titles / ordering / counts
+    loadTimeline();
+    loadDashboard(true);
   }catch(e){
     if(thinking){ thinking._stop(); thinking.remove(); }
     if(e.message === 'unauthorized') addMsg('err','未授权：请点右上角 ⚙ 填写正确的 API Token');
@@ -693,7 +1229,7 @@ function updateAuthUI(){
   const showMs = hasEntra && (mode === 'entra' || mode === 'both');
   const msB = $('#msBlock'), tkB = $('#tokenBlock');
   if(msB) msB.style.display = showMs ? '' : 'none';
-  if(tkB) tkB.style.display = (mode === 'entra') ? 'none' : '';
+  if(tkB) tkB.style.display = (mode === 'entra' || mode === 'tunnel') ? 'none' : '';
   const signedIn = !!msAccount;
   const si = $('#msSignIn'), so = $('#msSignOut'), st = $('#msStatus');
   if(si) si.style.display = signedIn ? 'none' : '';
@@ -703,7 +1239,12 @@ function updateAuthUI(){
 
 /* ---------- settings ---------- */
 const modal = $('#modal');
-function openModal(){ $('#baseInput').value = base; $('#tokenInput').value = token; updateAuthUI(); modal.classList.add('show'); }
+function openModal(){
+  $('#baseInput').value = base;
+  $('#tokenInput').value = token;
+  $('#previewLengthInput').value = appSettings.promptPreviewLength || 200;
+  updateAuthUI(); modal.classList.add('show');
+}
 $('#setBtn').onclick = openModal;
 $('#cancelBtn').onclick = ()=> modal.classList.remove('show');
 $('#msSignIn').onclick = ()=> signIn();
@@ -712,8 +1253,16 @@ $('#saveBtn').onclick = async ()=>{
   base = ($('#baseInput').value.trim() || location.origin).replace(/\/$/,'');
   token = $('#tokenInput').value.trim();
   localStorage.setItem('cb_base', base); localStorage.setItem('cb_token', token);
-  modal.classList.remove('show');
-  await boot(true);
+  const previewLength = Number($('#previewLengthInput').value);
+  if(!Number.isInteger(previewLength) || previewLength < 20 || previewLength > 1000){
+    alert('预览字符数必须是 20 到 1000 之间的整数。');
+    return;
+  }
+  try{
+    appSettings = await api('PATCH','/api/settings',{ promptPreviewLength: previewLength });
+    modal.classList.remove('show');
+    await boot(true);
+  }catch(e){ alert('保存设置失败：' + e.message); }
 };
 
 /* ---------- boot ---------- */
@@ -723,8 +1272,12 @@ async function boot(quiet){
     cfg = await api('GET','/api/webconfig');
   }catch(e){ if(!quiet) addMsg('err','连不上服务器：' + e.message); return; }
   await initAuth(cfg);
-  updateAuthUI();
   const mode = cfg.authMode || (cfg.authRequired ? 'apikey' : 'none');
+  if(mode === 'tunnel'){
+    token = '';
+    localStorage.removeItem('cb_token');
+  }
+  updateAuthUI();
   if(mode === 'entra'){
     if(!msToken){ addMsg('bot','请用 Microsoft 账号登录（点右上角 ⚙）。'); openModal(); return; }
   } else if(mode === 'both'){
@@ -732,11 +1285,29 @@ async function boot(quiet){
   } else {
     if(cfg.authRequired && !token){ addMsg('bot','⚠️ 这个服务需要 API Token，请点右上角 ⚙ 填写。'); openModal(); return; }
   }
+  try{ appSettings = await api('GET','/api/settings'); }catch(_){ appSettings = { promptPreviewLength: 200 }; }
+  await loadDashboard(false);
+  if(!dashboardTimer) dashboardTimer=setInterval(()=>loadDashboard(true),5000);
   await loadSessions();
-  if(sessions.length) await openSession(sessions.some(s=>s.id===sid) ? sid : sessions[0].id);
+  if(sessions.length){
+    const targetSession = sessions.some(s=>s.id===sid) ? sid : sessions[0].id;
+    const targetTurn = targetSession === sid ? initialTurnId : '';
+    initialTurnId = '';
+    await openSession(targetSession, targetTurn);
+  }
   else await newSession();
+  if(initialParams.get('dashboard') === '1') await openInbox();
+  if(initialParams.get('notificationSetup') === '1' && 'Notification' in window && Notification.permission === 'default'){
+    $('#enableNotifyBtn').focus();
+  }else if(initialParams.get('syncSetup') === '1' && dashboardState && dashboardState.sync && !dashboardState.sync.auth.connected){
+    $('#connectSyncBtn').focus();
+  }
 }
 boot(false);
+
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState === 'visible') loadDashboard(false);
+});
 
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
 </script>

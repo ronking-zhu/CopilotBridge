@@ -55,7 +55,7 @@ class StubRunner:
         self.calls = []
 
     async def run(self, prompt, conversation_id=None, new_session=False,
-                  session_id=None, attachments=None):
+                  session_id=None, attachments=None, history=None):
         self.calls.append({
             "prompt": prompt, "session_id": session_id,
             "attachments": list(attachments or []),
@@ -64,6 +64,8 @@ class StubRunner:
 
 
 class StubConfig:
+    AUTH_MODE = "apikey"
+
     def __init__(self, sessions_dir, max_mb=25, max_files=8):
         self.CHAT_API_TOKEN = TOKEN
         self.SESSIONS_DIR = sessions_dir
