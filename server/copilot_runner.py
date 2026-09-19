@@ -87,7 +87,7 @@ class CopilotRunner:
         if low.endswith(".ps1"):
             return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", self.exe]
         if low.endswith((".bat", ".cmd")):
-            return ["cmd", "/c", self.exe]
+            return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", "call", self.exe]
         return [self.exe]
 
     def _session_for(self, conversation_id, new_session) -> str | None:

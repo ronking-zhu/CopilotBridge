@@ -35,9 +35,11 @@ class SessionWatcher:
         self.interval = max(1.0, float(interval))
         self.settle_scans = max(0, int(settle_scans))
         self.last_scan_at: float | None = None
+        self.last_scan_duration_ms: float | None = None
         self.last_error = ""
         self.sessions_seen = 0
         self._stopped = asyncio.Event()
+        self._scan_lock = asyncio.Lock()
 
     @staticmethod
     def _fingerprint(source_key: str, message: dict) -> str:
@@ -77,9 +79,22 @@ class SessionWatcher:
         return None
 
     async def scan_once(self) -> ScanResult:
+        async with self._scan_lock:
+            started = time.monotonic()
+            try:
+                return await self._scan_once()
+            finally:
+                self.last_scan_duration_ms = round((time.monotonic() - started) * 1000, 1)
+                if self.last_scan_duration_ms >= 1000:
+                    logger.warning(
+                        "Native session scan slow: duration_ms=%.0f sessions=%d",
+                        self.last_scan_duration_ms, self.sessions_seen,
+                    )
+
+    async def _scan_once(self) -> ScanResult:
         baselined = created = errors = 0
         try:
-            summaries = list(self.discovery.list_sessions() or [])
+            summaries = await asyncio.to_thread(lambda: list(self.discovery.list_sessions() or []))
         except Exception as exc:  # noqa: BLE001 - one adapter outage must not stop the server
             self.last_error = str(exc)
             self.last_scan_at = time.time()
@@ -88,6 +103,8 @@ class SessionWatcher:
 
         self.sessions_seen = len(summaries)
         for summary in summaries:
+            if self._stopped.is_set():
+                break
             source_key = str(summary.get("sourceKey") or "")
             source = str(summary.get("source") or "")
             native_id = str(summary.get("nativeId") or summary.get("id") or "")
@@ -95,7 +112,7 @@ class SessionWatcher:
                 errors += 1
                 continue
             try:
-                detail = self.discovery.read_session_key(source_key)
+                detail = await asyncio.to_thread(self.discovery.read_session_key, source_key)
                 if detail is None:
                     continue
                 messages = list(detail.get("messages") or [])
@@ -190,6 +207,7 @@ class SessionWatcher:
     def describe(self) -> dict:
         return {
             "lastScanAt": self.last_scan_at,
+            "lastScanDurationMs": self.last_scan_duration_ms,
             "lastError": self.last_error,
             "sessionsSeen": self.sessions_seen,
             "intervalSeconds": self.interval,

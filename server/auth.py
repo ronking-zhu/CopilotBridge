@@ -302,7 +302,7 @@ class Authenticator:
             return self._check_api_key(request, allow_query)
         return False
 
-    def check_control(self, request) -> bool:
+    def check_control(self, request, *, host_key_only: bool = False) -> bool:
         """Authorize a Control-Panel request (``/api/control/*``).
 
         These are served on the same port as the public API, but the desktop
@@ -311,11 +311,16 @@ class Authenticator:
         of AUTH_MODE, which keeps the Control Panel working while still blocking a
         remote caller who has neither. Falls back to open only when nothing is
         configured (legacy no-auth).
+
+        Native-only operations set ``host_key_only`` to reject web identities and
+        unprovisioned keys without changing the legacy control API contract.
         """
         if self.api_token:
             provided = request.headers.get("X-API-Key") or _bearer(request)
             if provided and provided == self.api_token:
                 return True
+        if host_key_only:
+            return False
         if self.entra.enabled:
             token = _bearer(request)
             if token and _looks_like_jwt(token):

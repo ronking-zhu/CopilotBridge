@@ -31,9 +31,10 @@
   }
   header .logo{font-family:ui-monospace,Menlo,Consolas,monospace; color:var(--accent); font-weight:700}
   header h1{font-size:16px; margin:0; flex:1; font-weight:600}
-  header button{
+  header button, header .dashboard-link{
     background:var(--panel2); color:var(--text); border:1px solid var(--border);
     border-radius:8px; padding:7px 10px; font-size:13px; cursor:pointer;
+    text-decoration:none; white-space:nowrap;
   }
   header .iconbtn{position:relative; min-width:36px; min-height:34px}
   .badge{
@@ -42,7 +43,7 @@
     font:700 10px/14px ui-monospace,Menlo,Consolas,monospace; text-align:center;
   }
   .badge[hidden]{display:none}
-  header button:active{background:#2d333b}
+  header button:active, header .dashboard-link:active{background:#2d333b}
   #log{flex:1; overflow-y:auto; padding:14px 12px 8px; -webkit-overflow-scrolling:touch}
   .msg{margin:10px 0; display:flex}
   .msg.user{justify-content:flex-end}
@@ -102,7 +103,7 @@
   .card{background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px; width:100%; max-width:420px}
   .card h2{margin:0 0 12px; font-size:17px}
   .card label{display:block; font-size:13px; color:var(--muted); margin:12px 0 5px}
-  .card input{width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:9px; padding:10px}
+  .card input,.card select{width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:9px; padding:10px}
   .card .row{display:flex; gap:8px; margin-top:16px}
   .card .row button{flex:1; padding:10px; border-radius:9px; border:1px solid var(--border); background:var(--panel2); color:var(--text); font-size:14px}
   .card .row button.primary{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600}
@@ -231,21 +232,24 @@
   .bubble th{background:var(--panel2)}
   .think .t{font-variant-numeric:tabular-nums}
 </style>
+<link rel="stylesheet" href="/v23.css">
 </head>
 <body>
 <header>
   <button id="menuBtn" title="会话列表" aria-label="会话列表">☰</button>
   <span class="logo">&gt;_</span>
   <h1>Copilot Bridge</h1>
+  <a class="dashboard-link" id="dashboardLink" href="/?dashboard=1" title="打开 AI Dashboard" aria-label="打开 AI Dashboard">Dashboard</a>
   <button class="iconbtn" id="inboxBtn" title="AI Dashboard" aria-label="AI Dashboard">●<span class="badge" id="inboxBadge" hidden></span></button>
+  <button class="iconbtn" id="generateKnowledgeBtn" title="生成知识库和思维导图" aria-label="生成知识库和思维导图"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5A3.5 3.5 0 0 1 6.5 2H11v17H6.5A3.5 3.5 0 0 0 3 22z"/><path d="M13 19h4.5a3.5 3.5 0 0 1 3.5 3V10"/><path d="m18 2 .6 1.4L20 4l-1.4.6L18 6l-.6-1.4L16 4l1.4-.6zM21 6l.4.9.9.4-.9.4-.4.9-.4-.9-.9-.4.9-.4z"/></svg></button>
   <button class="iconbtn" id="timelineBtn" title="输入时间线" aria-label="输入时间线">☷</button>
-  <button class="iconbtn" id="setBtn" title="设置">⚙</button>
+  <button class="iconbtn" id="setBtn" title="设置" aria-label="设置">⚙</button>
 </header>
 
 <div id="scrim"></div>
 <aside id="drawer">
   <div class="dhead">
-    <h2>会话</h2>
+    <h2 id="drawerTitle">会话</h2>
     <button class="dnew dghost" id="importBtn" title="查看全部机器的会话历史">History</button>
     <button class="dnew" id="newBtn">＋ 新会话</button>
   </div>
@@ -254,7 +258,7 @@
 
 <aside id="timeline" aria-label="输入时间线">
   <div class="thead">
-    <h2>输入时间线</h2>
+    <h2 id="timelineTitle">输入时间线</h2>
     <button class="tclose" id="timelineClose" title="关闭" aria-label="关闭">×</button>
   </div>
   <div id="tlist"></div>
@@ -266,12 +270,12 @@
     <button class="iclose" id="inboxClose" title="关闭" aria-label="关闭">×</button>
   </div>
   <div class="dashstats">
-    <div class="dashstat"><strong id="unreadStat">0</strong><span>待查看</span></div>
-    <div class="dashstat"><strong id="runningStat">0</strong><span>正在运行</span></div>
-    <div class="dashstat"><strong id="watchedStat">0</strong><span>监控会话</span></div>
+    <div class="dashstat"><strong id="unreadStat">0</strong><span id="unreadStatLabel">待查看</span></div>
+    <div class="dashstat"><strong id="runningStat">0</strong><span id="runningStatLabel">正在运行</span></div>
+    <div class="dashstat"><strong id="watchedStat">0</strong><span id="watchedStatLabel">监控会话</span></div>
   </div>
   <div class="notification-setup" id="notificationSetupNotice" hidden>
-    <strong>开启 AI 回复提醒</strong>
+    <strong id="notificationSetupTitle">开启 AI 回复提醒</strong>
     <span id="notificationSetupMessage">点击“允许浏览器通知”，然后在 Edge 的提示中选择“允许”。</span>
   </div>
   <div class="dashactions">
@@ -280,7 +284,7 @@
     <button id="enableNotifyBtn" type="button">允许浏览器通知</button>
   </div>
   <div class="syncsetup" id="syncSetupPanel">
-    <strong>OneDrive 会话同步</strong>
+    <strong id="syncSetupTitle">OneDrive 会话同步</strong>
     <span id="syncStatusMessage">正在读取同步状态…</span>
     <div class="syncactions">
       <button id="connectSyncBtn" type="button">连接 OneDrive</button>
@@ -303,12 +307,12 @@
 
 <div class="modal" id="modal">
   <div class="card">
-    <h2>设置</h2>
-    <label>服务器地址（默认当前地址，一般不用改）</label>
+    <h2 id="connectionSettingsTitle">设置</h2>
+    <label id="serverAddressLabel">服务器地址（默认当前地址，一般不用改）</label>
     <input id="baseInput" placeholder="https://xxx-3978.xxx.devtunnels.ms">
 
     <div id="msBlock" style="display:none">
-      <label>Microsoft 账号登录</label>
+      <label id="microsoftSignInLabel">Microsoft 账号登录</label>
       <div id="msStatus" class="hint" style="margin:0 0 8px">未登录</div>
       <div class="row" style="margin-bottom:4px">
         <button id="msSignIn" type="button" class="primary">使用 Microsoft 登录</button>
@@ -317,18 +321,24 @@
     </div>
 
     <div id="tokenBlock">
-      <label>API Token</label>
+      <label id="apiTokenLabel">API Token</label>
       <input id="tokenInput" type="password" placeholder="粘贴 .env 里的 CHAT_API_TOKEN">
     </div>
 
-    <label>输入时间线预览字符数</label>
+    <label id="previewLengthLabel">输入时间线预览字符数</label>
     <input id="previewLengthInput" type="number" min="20" max="1000" step="10" inputmode="numeric">
+
+    <label id="uiLanguageLabel">界面语言</label>
+    <select id="uiLanguageInput">
+      <option value="zh">中文</option>
+      <option value="en">English</option>
+    </select>
 
     <div class="row">
       <button id="cancelBtn" type="button">取消</button>
       <button id="saveBtn" type="button" class="primary">保存</button>
     </div>
-      <div class="hint">本机 localhost 无需登录；通过 Dev Tunnel 远程访问时，Microsoft 登录会在打开本页前完成。</div>
+      <div class="hint" id="connectionSettingsHint">本机 localhost 无需登录；通过 Dev Tunnel 远程访问时，Microsoft 登录会在打开本页前完成。</div>
   </div>
 </div>
 
@@ -346,9 +356,11 @@ let token = localStorage.getItem('cb_token') || window.__CB_KEY || '';
 const initialParams = new URLSearchParams(location.search);
 let sid   = initialParams.get('conversation') || localStorage.getItem('cb_sid') || '';
 let initialTurnId = initialParams.get('turn') || '';
+let initialMessageId = initialParams.get('message') || '';
 let sessions = [];
 let turns = [];
-let appSettings = { promptPreviewLength: 200 };
+let uiLanguage = localStorage.getItem('cb_ui_language') === 'en' ? 'en' : 'zh';
+let appSettings = { promptPreviewLength: 200, uiLanguage };
 let dashboardState = null;
 let dashboardInitialized = false;
 let knownInboxIds = new Set();
@@ -379,9 +391,66 @@ function hdr(){
   else if(token) h['X-API-Key'] = token;
   return h;
 }
-function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 function scroll(){ log.scrollTop = log.scrollHeight; }
+function uiText(zh, en){ return uiLanguage === 'en' ? en : zh; }
+window.cbUiText = uiText;
+function setUiText(selector, zh, en){
+  const element = $(selector);
+  if(element) element.textContent = uiText(zh, en);
+}
+function setUiAttrs(selector, zh, en){
+  const element = $(selector);
+  if(!element) return;
+  const value = uiText(zh, en);
+  element.title = value;
+  element.setAttribute('aria-label', value);
+}
+function applyBaseUiLanguage(){
+  document.documentElement.lang = uiLanguage === 'en' ? 'en' : 'zh';
+  setUiAttrs('#menuBtn','会话列表','Conversation list');
+  setUiAttrs('#dashboardLink','打开 AI Dashboard','Open AI Dashboard');
+  if(!$('#generateKnowledgeBtn').hasAttribute('aria-busy')){
+    setUiAttrs('#generateKnowledgeBtn','生成知识库和思维导图','Generate knowledge and mind map');
+  }
+  setUiAttrs('#timelineBtn','输入时间线','Prompt timeline');
+  setUiAttrs('#setBtn','设置','Settings');
+  setUiText('#drawerTitle','会话','Conversations');
+  setUiAttrs('#importBtn','查看全部机器的会话历史','View conversation history from all devices');
+  setUiText('#newBtn','＋ 新会话','＋ New conversation');
+  setUiText('#timelineTitle','输入时间线','Prompt timeline');
+  setUiAttrs('#timelineClose','关闭','Close');
+  setUiAttrs('#inboxClose','关闭','Close');
+  setUiText('#unreadStatLabel','待查看','To review');
+  setUiText('#runningStatLabel','正在运行','Running');
+  setUiText('#watchedStatLabel','监控会话','Watched');
+  setUiText('#notificationSetupTitle','开启 AI 回复提醒','Enable AI response alerts');
+  setUiText('#notificationSetupMessage','点击“允许浏览器通知”，然后在 Edge 的提示中选择“允许”。','Select “Allow browser notifications”, then choose “Allow” in Edge.');
+  setUiText('#scanInboxBtn','立即扫描','Scan now');
+  setUiText('#markInboxSeenBtn','全部已读','Mark all read');
+  setUiText('#enableNotifyBtn','允许浏览器通知','Allow browser notifications');
+  setUiText('#syncSetupTitle','OneDrive 会话同步','OneDrive conversation sync');
+  setUiText('#syncStatusMessage','正在读取同步状态…','Loading sync status…');
+  setUiText('#connectSyncBtn','连接 OneDrive','Connect OneDrive');
+  setUiText('#runSyncBtn','立即同步','Sync now');
+  setUiText('#disconnectSyncBtn','断开','Disconnect');
+  setUiAttrs('#attachBtn','添加图片','Add images');
+  $('#input').placeholder = uiText('给 Copilot agent 下指令…','Send instructions to the Copilot agent…');
+  setUiText('#send','发送','Send');
+  setUiText('#connectionSettingsTitle','设置','Settings');
+  setUiText('#serverAddressLabel','服务器地址（默认当前地址，一般不用改）','Server address (the current address is normally correct)');
+  setUiText('#microsoftSignInLabel','Microsoft 账号登录','Microsoft account sign-in');
+  setUiText('#apiTokenLabel','API Token','API token');
+  setUiText('#previewLengthLabel','输入时间线预览字符数','Prompt timeline preview length');
+  setUiText('#uiLanguageLabel','界面语言','Interface language');
+  setUiText('#msSignIn','使用 Microsoft 登录','Sign in with Microsoft');
+  setUiText('#msSignOut','退出登录','Sign out');
+  setUiText('#cancelBtn','取消','Cancel');
+  setUiText('#saveBtn','保存','Save');
+  updateAuthUI();
+}
+applyBaseUiLanguage();
 
 async function api(method, path, body){
   if(msalApp && msAccount && (!msToken || Date.now() > msTokenExp - 300000)){
@@ -458,10 +527,11 @@ function mdToHtml(src){
 }
 
 /* ---------- messages ---------- */
-function addMsg(kind, text, images, turnId){
+function addMsg(kind, text, images, turnId, messageId){
   const wrap = document.createElement('div');
   wrap.className = 'msg ' + kind;
   if(turnId) wrap.dataset.turnId = turnId;
+  if(messageId) wrap.dataset.messageId = messageId;
   const b = document.createElement('div');
   b.className = 'bubble';
   let html = '';
@@ -506,7 +576,8 @@ function renderPending(){
   pending.forEach((p, idx)=>{
     const d = document.createElement('div');
     d.className = 'pthumb';
-    d.innerHTML = '<img alt=""><button class="x" title="移除" type="button">✕</button>';
+    d.innerHTML = '<img alt=""><button class="x" title="'
+      + uiText('移除','Remove') + '" type="button">✕</button>';
     d.querySelector('img').src = p.dataUrl;
     d.querySelector('.x').onclick = ()=>{ pending.splice(idx, 1); renderPending(); updateSendEnabled(); };
     previews.appendChild(d);
@@ -543,14 +614,24 @@ function addThinking(start){
   };
   const paint = ()=>{
     const el = wrap.querySelector('.bubble'); if(!el) return;
-    if(wrap._queued && wrap._qpos > 0){ el.textContent = '⏳ 排队中… 前面还有 ' + wrap._qpos + ' 个请求'; return; }
+    if(wrap._queued && wrap._qpos > 0){
+      el.textContent = uiText(
+        '⏳ 排队中… 前面还有 ' + wrap._qpos + ' 个请求',
+        '⏳ Queued… ' + wrap._qpos + ' request(s) ahead',
+      );
+      return;
+    }
     const ms = Date.now() - wrap._t0;
     // No timeout: Copilot is given as long as it needs. Show elapsed time, and for
     // long tasks reassure the user that waiting (or leaving) is fine.
-    let html = '🤖 Copilot 正在工作… <span class="t">' + fmtDur(ms) + '</span>';
+    let html = uiText('🤖 Copilot 正在工作… ','🤖 Copilot is working… ')
+      + '<span class="t">' + fmtDur(ms) + '</span>';
     if(ms > 60000)
       html += '<div style="font-size:12px;color:var(--muted);margin-top:6px">'
-        + '长任务执行中，无需关闭页面；即使离开，结果也会保存到本会话。</div>';
+        + uiText(
+          '长任务执行中，无需关闭页面；即使离开，结果也会保存到本会话。',
+          'This task is still running. You may leave; its result will remain in this conversation.',
+        ) + '</div>';
     el.innerHTML = html;
   };
   paint();
@@ -571,10 +652,10 @@ function relTime(ts){
   if(!ts) return '';
   const sec = ts > 1e12 ? ts/1000 : ts;
   const d = Math.max(0, Date.now()/1000 - sec);
-  if(d < 60) return '刚刚';
-  if(d < 3600) return Math.floor(d/60) + ' 分钟前';
-  if(d < 86400) return Math.floor(d/3600) + ' 小时前';
-  return Math.floor(d/86400) + ' 天前';
+  if(d < 60) return uiText('刚刚','just now');
+  if(d < 3600) return uiText(Math.floor(d/60) + ' 分钟前',Math.floor(d/60) + ' min ago');
+  if(d < 86400) return uiText(Math.floor(d/3600) + ' 小时前',Math.floor(d/3600) + ' hr ago');
+  return uiText(Math.floor(d/86400) + ' 天前',Math.floor(d/86400) + ' days ago');
 }
 function sessionPromptCount(session){
   const exact = Number(session && session.promptCount);
@@ -585,21 +666,26 @@ function isShortSession(session){ return sessionPromptCount(session) <= shortSes
 function shortFilterControl(candidates, onChange){
   const control = document.createElement('div');
   control.className = 'short-filter';
-  control.title = '按用户提问次数隐藏短会话；不会删除数据';
+  control.title = uiText(
+    '按用户提问次数隐藏短会话；不会删除数据',
+    'Hide short conversations by user prompt count; no data is deleted',
+  );
   control.innerHTML = '<label class="short-filter-toggle"><input type="checkbox">'
-    + '<span class="track" aria-hidden="true"></span><span class="label">隐藏不超过</span></label>'
+    + '<span class="track" aria-hidden="true"></span><span class="label">'
+    + uiText('隐藏不超过','Hide up to') + '</span></label>'
     + '<input class="threshold" type="number" min="0" max="99" step="1" inputmode="numeric">'
-    + '<span class="unit">轮问答</span><span class="count"></span>';
+    + '<span class="unit">' + uiText('轮问答','prompts') + '</span><span class="count"></span>';
   const checkbox = control.querySelector('input[type="checkbox"]');
   const threshold = control.querySelector('.threshold');
   checkbox.checked = hideShortSessions;
-  checkbox.setAttribute('aria-label', '隐藏短会话');
+  checkbox.setAttribute('aria-label', uiText('隐藏短会话','Hide short conversations'));
   threshold.value = String(shortSessionPrompts);
-  threshold.setAttribute('aria-label', '短会话问答次数阈值');
+  threshold.setAttribute('aria-label', uiText('短会话问答次数阈值','Short-conversation prompt threshold'));
   const updateCount = ()=>{
     const hidden = candidates.filter(session => isShortSession(session)
       && (session.conversationId || session.id) !== sid).length;
-    control.querySelector('.count').textContent = hideShortSessions ? '已隐藏 ' + hidden : '显示全部';
+    control.querySelector('.count').textContent = hideShortSessions
+      ? uiText('已隐藏 ' + hidden,hidden + ' hidden') : uiText('显示全部','Showing all');
   };
   updateCount();
   checkbox.onchange = ()=>{
@@ -620,20 +706,25 @@ function shortFilterControl(candidates, onChange){
 }
 function renderSessions(){
   slist.innerHTML = '';
-  if(!sessions.length){ slist.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:13px">还没有会话，点上面「新会话」开始。</div>'; return; }
+  if(!sessions.length){
+    slist.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:13px">'
+      + uiText('还没有会话，点上面「新会话」开始。','No conversations yet. Select “New conversation” to begin.') + '</div>';
+    return;
+  }
   slist.appendChild(shortFilterControl(sessions, renderSessions));
   const visible = sessions.filter(s => !hideShortSessions || s.id === sid || !isShortSession(s));
   if(!visible.length){
-    slist.insertAdjacentHTML('beforeend', '<div class="snote">没有较长的会话；关闭上方筛选可查看全部。</div>');
+    slist.insertAdjacentHTML('beforeend', '<div class="snote">'
+      + uiText('没有较长的会话；关闭上方筛选可查看全部。','No longer conversations match. Turn off the filter to view all.') + '</div>');
     return;
   }
   for(const s of visible){
     const item = document.createElement('div');
     item.className = 'sitem' + (s.id === sid ? ' active' : '');
-    const title = (s.title && s.title.trim()) ? s.title : '未命名会话';
+    const title = (s.title && s.title.trim()) ? s.title : uiText('未命名会话','Untitled conversation');
     item.innerHTML = '<div class="stitle"><div class="t"></div><div class="sub">'
-      + relTime(s.updatedAt) + ' · ' + (s.messageCount||0) + ' 条</div></div>'
-      + '<button class="del" title="删除">🗑</button>';
+      + relTime(s.updatedAt) + ' · ' + (s.messageCount||0) + uiText(' 条',' messages') + '</div></div>'
+      + '<button class="del" title="' + uiText('删除','Delete') + '">🗑</button>';
     item.querySelector('.t').textContent = title;
     item.querySelector('.stitle').onclick = ()=> openSession(s.id);
     item.querySelector('.del').onclick = (e)=>{ e.stopPropagation(); delSession(s.id, title); };
@@ -647,16 +738,19 @@ async function loadSessions(){
 }
 
 /* ---------- prompt timeline ---------- */
-function updateLocation(turnId){
+function updateLocation(turnId, messageId){
   const url = new URL(location.href);
   if(sid) url.searchParams.set('conversation', sid); else url.searchParams.delete('conversation');
   if(turnId) url.searchParams.set('turn', turnId); else url.searchParams.delete('turn');
+  if(messageId) url.searchParams.set('message', messageId); else url.searchParams.delete('message');
+  if(turnId || messageId) url.searchParams.delete('knowledge');
   history.replaceState(null, '', url.pathname + url.search + url.hash);
 }
 function renderTimeline(activeTurnId){
   tlist.innerHTML = '';
   if(!turns.length){
-    tlist.innerHTML = '<div class="snote">这个会话还没有用户输入。</div>';
+    tlist.innerHTML = '<div class="snote">'
+      + uiText('这个会话还没有用户输入。','This conversation has no user prompts yet.') + '</div>';
     return;
   }
   for(const turn of turns){
@@ -669,10 +763,11 @@ function renderTimeline(activeTurnId){
     const body = document.createElement('span');
     const preview = document.createElement('span');
     preview.className = 'tpreview';
-    preview.textContent = turn.previewText || '(空输入)';
+    preview.textContent = turn.previewText || uiText('(空输入)','(empty prompt)');
     const meta = document.createElement('span');
     meta.className = 'tmeta';
-    meta.textContent = relTime(turn.createdAt) + ' · ' + (turn.messageCount || 0) + ' 条';
+    meta.textContent = relTime(turn.createdAt) + ' · ' + (turn.messageCount || 0)
+      + uiText(' 条',' messages');
     body.append(preview, meta);
     item.append(number, body);
     item.onclick = ()=> goToTurn(turn.id);
@@ -686,13 +781,19 @@ async function loadTimeline(activeTurnId){
     renderTimeline(activeTurnId);
   }catch(e){
     turns = [];
-    tlist.innerHTML = '<div class="snote">读取输入时间线失败：' + esc(e.message) + '</div>';
+    tlist.innerHTML = '<div class="snote">'
+      + uiText('读取输入时间线失败：','Could not load prompt timeline: ')
+      + esc(e.message) + '</div>';
   }
 }
 function findTurnElement(turnId){
   return [...log.querySelectorAll('.msg[data-turn-id]')]
     .find(el => el.dataset.turnId === turnId && el.classList.contains('user'))
     || [...log.querySelectorAll('.msg[data-turn-id]')].find(el => el.dataset.turnId === turnId);
+}
+function findMessageElement(messageId){
+  return [...log.querySelectorAll('.msg[data-message-id]')]
+    .find(el => el.dataset.messageId === messageId);
 }
 async function goToTurn(turnId){
   let target = findTurnElement(turnId);
@@ -708,12 +809,14 @@ async function goToTurn(turnId){
 }
 async function openTimeline(){
   closeDrawer(); closeInbox();
+  timeline.inert = false; timeline.setAttribute('aria-hidden', 'false');
   timeline.classList.add('show'); scrim.classList.add('show');
   const active = new URLSearchParams(location.search).get('turn') || '';
   await loadTimeline(active);
 }
 function closeTimeline(){
   timeline.classList.remove('show');
+  timeline.inert = true; timeline.setAttribute('aria-hidden', 'true');
   if(!drawer.classList.contains('show') && !inboxDrawer.classList.contains('show')) scrim.classList.remove('show');
 }
 $('#timelineBtn').onclick = openTimeline;
@@ -734,18 +837,18 @@ function updateNotificationButton(){
   const setupRequested = initialParams.get('notificationSetup') === '1';
   btn.classList.remove('setup-primary');
   if(!('Notification' in window)){
-    btn.textContent='通知不可用'; btn.disabled=true;
-    if(setupRequested){ notice.hidden=false; message.textContent='当前浏览器不支持桌面通知。'; }
+    btn.textContent=uiText('通知不可用','Notifications unavailable'); btn.disabled=true;
+    if(setupRequested){ notice.hidden=false; message.textContent=uiText('当前浏览器不支持桌面通知。','This browser does not support desktop notifications.'); }
     return;
   }
   if(Notification.permission === 'granted'){
-    btn.textContent='桌面通知已启用'; btn.disabled=true;
-    if(setupRequested){ notice.hidden=false; message.textContent='通知已启用，可以关闭此页面。'; }
+    btn.textContent=uiText('桌面通知已启用','Desktop notifications enabled'); btn.disabled=true;
+    if(setupRequested){ notice.hidden=false; message.textContent=uiText('通知已启用，可以关闭此页面。','Notifications are enabled. You may close this page.'); }
   }else if(Notification.permission === 'denied'){
-    btn.textContent='通知已被浏览器阻止'; btn.disabled=true; notice.hidden=false;
-    message.textContent='请点击 Edge 地址栏左侧的站点信息，将“通知”改为“允许”，然后刷新页面。';
+    btn.textContent=uiText('通知已被浏览器阻止','Notifications blocked by browser'); btn.disabled=true; notice.hidden=false;
+    message.textContent=uiText('请点击 Edge 地址栏左侧的站点信息，将“通知”改为“允许”，然后刷新页面。','Open site information on the left of the Edge address bar, set Notifications to Allow, then refresh.');
   }else{
-    btn.textContent='允许浏览器通知'; btn.disabled=false;
+    btn.textContent=uiText('允许浏览器通知','Allow browser notifications'); btn.disabled=false;
     if(setupRequested){ notice.hidden=false; btn.classList.add('setup-primary'); }
   }
 }
@@ -787,26 +890,27 @@ function renderSyncStatus(sync){
   disconnect.hidden=!auth.connected;
   connect.disabled=run.disabled=disconnect.disabled=syncBusy || !!sync.running;
   if(syncBusy){ message.textContent=syncBusyMessage; return; }
-  if(!sync.enabled){ message.textContent='此版本未启用 OneDrive 同步。'; return; }
-  if(!auth.configured){ message.textContent='发布者尚未配置 OneDrive Public Client。'; connect.disabled=true; return; }
-  if(sync.running){ message.textContent='正在先上传本机会话，再下载并合并其他设备的会话…'; return; }
+  if(!sync.enabled){ message.textContent=uiText('此版本未启用 OneDrive 同步。','OneDrive sync is disabled in this build.'); return; }
+  if(!auth.configured){ message.textContent=uiText('发布者尚未配置 OneDrive Public Client。','The publisher has not configured a OneDrive public client.'); connect.disabled=true; return; }
+  if(sync.running){ message.textContent=uiText('正在先上传本机会话，再下载并合并其他设备的会话…','Uploading local conversations, then downloading and merging other devices…'); return; }
   if(!auth.connected && localMode){
-    connect.textContent='启用本机 OneDrive';
-    message.textContent='使用本机已登录的 OneDrive 文件夹：' + auth.root + '。启用后先上传本机会话，再下载其他电脑的历史。';
+    connect.textContent=uiText('启用本机 OneDrive','Enable local OneDrive');
+    message.textContent=uiText('使用本机已登录的 OneDrive 文件夹：','Use the locally signed-in OneDrive folder: ')
+      + auth.root + uiText('。启用后先上传本机会话，再下载其他电脑的历史。','. Local conversations upload first, followed by history from other computers.');
     return;
   }
   if(!auth.connected){
-    message.textContent='连接后会先导入并上传这台电脑已有的 CLI/VS Code 会话，再下载其他电脑的历史，不会覆盖任一侧。';
+    message.textContent=uiText('连接后会先导入并上传这台电脑已有的 CLI/VS Code 会话，再下载其他电脑的历史，不会覆盖任一侧。','After connecting, existing CLI/VS Code conversations upload first, then history downloads from other computers. Neither side is overwritten.');
     return;
   }
   const result=sync.lastResult || {};
-  const parts=[auth.username || 'Microsoft 账号已连接'];
-  if(sync.lastSuccess) parts.push('同步于' + relTime(sync.lastSuccess));
-  if(result.importedNativeSessions) parts.push('导入本机 ' + result.importedNativeSessions);
-  if(result.pushedEventCount) parts.push('上传 ' + result.pushedEventCount);
-  if(result.pulledEventCount) parts.push('下载 ' + result.pulledEventCount);
-  if(sync.pendingEventCount) parts.push('待上传 ' + sync.pendingEventCount);
-  if(sync.lastError) parts.push('错误：' + sync.lastError);
+  const parts=[auth.username || uiText('Microsoft 账号已连接','Microsoft account connected')];
+  if(sync.lastSuccess) parts.push(uiText('同步于','Synced ') + relTime(sync.lastSuccess));
+  if(result.importedNativeSessions) parts.push(uiText('导入本机 ','Imported locally ') + result.importedNativeSessions);
+  if(result.pushedEventCount) parts.push(uiText('上传 ','Uploaded ') + result.pushedEventCount);
+  if(result.pulledEventCount) parts.push(uiText('下载 ','Downloaded ') + result.pulledEventCount);
+  if(sync.pendingEventCount) parts.push(uiText('待上传 ','Pending upload ') + sync.pendingEventCount);
+  if(sync.lastError) parts.push(uiText('错误：','Error: ') + sync.lastError);
   message.textContent=parts.join(' · ');
 }
 function renderDashboard(){
@@ -819,21 +923,21 @@ function renderDashboard(){
   inboxBadge.textContent = unread > 99 ? '99+' : String(unread);
   inboxList.innerHTML = '';
   if(state.activeJobs && state.activeJobs.length){
-    const heading=document.createElement('div'); heading.className='inbox-section'; heading.textContent='正在运行'; inboxList.appendChild(heading);
+    const heading=document.createElement('div'); heading.className='inbox-section'; heading.textContent=uiText('正在运行','Running'); inboxList.appendChild(heading);
     for(const job of state.activeJobs){
       const row=document.createElement('div'); row.className='jobrow';
       const dot=document.createElement('span'); dot.className='jobdot';
       const body=document.createElement('div'); body.className='inboxbody';
       const title=document.createElement('div'); title.className='inboxtitle'; title.textContent=job.title || 'Untitled conversation';
-      const meta=document.createElement('div'); meta.className='inboxmeta'; meta.textContent=(job.status === 'queued' ? '排队中' : 'AI 正在处理') + ' · ' + relTime(job.createdAt);
+      const meta=document.createElement('div'); meta.className='inboxmeta'; meta.textContent=(job.status === 'queued' ? uiText('排队中','Queued') : uiText('AI 正在处理','AI is working')) + ' · ' + relTime(job.createdAt);
       body.append(title,meta); row.append(dot,body);
       row.onclick=()=>{ if(job.conversationId) openSession(job.conversationId); };
       inboxList.appendChild(row);
     }
   }
-  const heading=document.createElement('div'); heading.className='inbox-section'; heading.textContent='最近回复'; inboxList.appendChild(heading);
+  const heading=document.createElement('div'); heading.className='inbox-section'; heading.textContent=uiText('最近回复','Recent responses'); inboxList.appendChild(heading);
   if(!state.inbox || !state.inbox.length){
-    const empty=document.createElement('div'); empty.className='snote'; empty.textContent='还没有新的 AI 回复。'; inboxList.appendChild(empty);
+    const empty=document.createElement('div'); empty.className='snote'; empty.textContent=uiText('还没有新的 AI 回复。','No new AI responses yet.'); inboxList.appendChild(empty);
   }else{
     for(const item of state.inbox){
       const row=document.createElement('div'); row.className='inboxitem ' + (item.status === 'unread' ? 'unread' : ''); row.tabIndex=0; row.setAttribute('role','button');
@@ -841,9 +945,9 @@ function renderDashboard(){
       const body=document.createElement('span'); body.className='inboxbody';
       const title=document.createElement('span'); title.className='inboxtitle'; title.textContent=item.title || 'Untitled conversation';
       const summary=document.createElement('span'); summary.className='inboxsummary'; summary.textContent=item.summary || '(no text)';
-      const meta=document.createElement('span'); meta.className='inboxmeta'; meta.textContent=relTime(item.createdAt) + (item.status === 'unread' ? ' · 未读' : ' · 已查看');
+      const meta=document.createElement('span'); meta.className='inboxmeta'; meta.textContent=relTime(item.createdAt) + (item.status === 'unread' ? uiText(' · 未读',' · Unread') : uiText(' · 已查看',' · Seen'));
       body.append(title,summary,meta);
-      const ignore=document.createElement('button'); ignore.type='button'; ignore.className='inboxignore'; ignore.title='忽略'; ignore.textContent='×';
+      const ignore=document.createElement('button'); ignore.type='button'; ignore.className='inboxignore'; ignore.title=uiText('忽略','Ignore'); ignore.textContent='×';
       ignore.onclick=async e=>{ e.stopPropagation(); await api('PATCH','/api/inbox/'+encodeURIComponent(item.id),{status:'ignored'}); await loadDashboard(false); };
       row.append(source,body,ignore);
       row.onclick=()=>openInboxItem(item);
@@ -896,7 +1000,7 @@ async function runSyncAction(path, pendingText){
     await loadSessions();
     await loadDashboard(false);
   }catch(e){
-    failure='同步失败：' + e.message;
+    failure=uiText('同步失败：','Sync failed: ') + e.message;
   }finally{
     syncBusy=false;
     syncBusyMessage='';
@@ -904,14 +1008,14 @@ async function runSyncAction(path, pendingText){
     if(failure) $('#syncStatusMessage').textContent=failure;
   }
 }
-$('#connectSyncBtn').onclick=()=>runSyncAction('/api/sync/connect','请在打开的 Microsoft 登录窗口中完成授权…');
-$('#runSyncBtn').onclick=()=>runSyncAction('/api/sync/run','正在先上传本机变化，再下载其他设备的变化…');
-$('#disconnectSyncBtn').onclick=()=>runSyncAction('/api/sync/disconnect','正在断开 OneDrive；本地会话不会删除…');
+$('#connectSyncBtn').onclick=()=>runSyncAction('/api/sync/connect',uiText('请在打开的 Microsoft 登录窗口中完成授权…','Complete authorization in the Microsoft sign-in window…'));
+$('#runSyncBtn').onclick=()=>runSyncAction('/api/sync/run',uiText('正在先上传本机变化，再下载其他设备的变化…','Uploading local changes, then downloading changes from other devices…'));
+$('#disconnectSyncBtn').onclick=()=>runSyncAction('/api/sync/disconnect',uiText('正在断开 OneDrive；本地会话不会删除…','Disconnecting OneDrive; local conversations will remain…'));
 $('#connectSyncBtn').onclick=()=>{
   const auth=dashboardState && dashboardState.sync && dashboardState.sync.auth || {};
   const pending=auth.mode === 'local-folder'
-    ? '正在启用本机 OneDrive 文件夹并执行首次同步…'
-    : '请在打开的 Microsoft 登录窗口中完成授权…';
+    ? uiText('正在启用本机 OneDrive 文件夹并执行首次同步…','Enabling the local OneDrive folder and running the first sync…')
+    : uiText('请在打开的 Microsoft 登录窗口中完成授权…','Complete authorization in the Microsoft sign-in window…');
   runSyncAction('/api/sync/connect',pending);
 };
 $('#markInboxSeenBtn').onclick=async()=>{ await api('POST','/api/inbox/mark-all-seen'); await loadDashboard(false); };
@@ -935,12 +1039,15 @@ function renderHistory(data){
   slist.innerHTML = '';
   const back = document.createElement('div');
   back.className = 'sback';
-  back.innerHTML = '← 返回会话';
+  back.textContent = uiText('← 返回会话','← Back to conversations');
   back.onclick = ()=> loadSessions();
   slist.appendChild(back);
   const note = document.createElement('div');
   note.className = 'snote';
-  note.textContent = '显示全部机器的会话；选择机器名可筛选。尚未进入 Bridge 的本机会话仍可直接导入。';
+  note.textContent = uiText(
+    '显示全部机器的会话；选择机器名可筛选。尚未进入 Bridge 的本机会话仍可直接导入。',
+    'Shows conversations from every device. Select a device to filter; local conversations not yet in Bridge can be imported.',
+  );
   slist.appendChild(note);
   const filters = document.createElement('div');
   filters.id = 'machineFilters';
@@ -951,7 +1058,9 @@ function renderHistory(data){
   slist.appendChild(quality);
   const box = document.createElement('div');
   box.className = 'ssearch';
-  box.innerHTML = '<input id="historySearch" type="search" placeholder="搜索机器 / 会话 / 仓库" autocomplete="off" autocapitalize="off" autocorrect="off">';
+  box.innerHTML = '<input id="historySearch" type="search" placeholder="'
+    + uiText('搜索机器 / 会话 / 仓库','Search device / conversation / repository')
+    + '" autocomplete="off" autocapitalize="off" autocorrect="off">';
   slist.appendChild(box);
   const wrap = document.createElement('div');
   wrap.id = 'historyList';
@@ -991,7 +1100,8 @@ function renderHistoryItems(){
   const wrap = document.getElementById('historyList');
   if(!wrap) return;
   wrap.innerHTML = '';
-  if(!historyItems.length){ wrap.innerHTML = '<div class="snote">没有发现历史会话。</div>'; return; }
+  if(!historyItems.length){ wrap.innerHTML = '<div class="snote">'
+    + uiText('没有发现历史会话。','No historical conversations found.') + '</div>'; return; }
   const q = historyQuery.trim().toLowerCase();
   const srcLabel = s => String(s.source || '').startsWith('vscode') ? 'vscode vs code insiders' : (s.source === 'cli' ? 'cli' : '');
   const items = historyItems.filter(s =>{
@@ -1000,19 +1110,21 @@ function renderHistoryItems(){
     if(!q) return true;
     return ((s.machineName || '') + ' ' + (s.title || '') + ' ' + shortRepo(s) + ' ' + srcLabel(s)).toLowerCase().includes(q);
   });
-  if(!items.length){ wrap.innerHTML = '<div class="snote">当前筛选条件下没有会话。</div>'; return; }
+  if(!items.length){ wrap.innerHTML = '<div class="snote">'
+    + uiText('当前筛选条件下没有会话。','No conversations match the current filters.') + '</div>'; return; }
   for(const s of items){
     const item = document.createElement('div');
     item.className = 'sitem' + (s.conversationId === sid ? ' active' : '');
-    const title = (s.title && s.title.trim()) ? s.title : '未命名会话';
+    const title = (s.title && s.title.trim()) ? s.title : uiText('未命名会话','Untitled conversation');
     const machine = s.machineName || 'Unknown device';
     const repo = shortRepo(s);
     const src = s.source === 'vscode-insiders' ? 'VS Code Insiders'
       : (s.source === 'vscode' ? 'VS Code' : (s.source === 'cli' ? 'CLI' : 'Bridge'));
     item.innerHTML = '<div class="stitle"><div class="t"></div><div class="sub"></div></div>'
-      + (s.importable ? '<button class="imp">导入</button>' : '');
+      + (s.importable ? '<button class="imp">' + uiText('导入','Import') + '</button>' : '');
     item.querySelector('.t').textContent = machine + ' - ' + title;
-    item.querySelector('.sub').textContent = [src, repo, relTime(s.updatedAt), (s.messageCount||0) + ' 条'].filter(Boolean).join(' · ');
+    item.querySelector('.sub').textContent = [src, repo, relTime(s.updatedAt),
+      (s.messageCount||0) + uiText(' 条',' messages')].filter(Boolean).join(' · ');
     const go = ()=> s.importable ? importCopilot(s.sourceKey || s.id) : openSession(s.conversationId);
     item.querySelector('.stitle').onclick = go;
     const importButton = item.querySelector('.imp');
@@ -1021,11 +1133,13 @@ function renderHistoryItems(){
   }
 }
 async function loadHistory(){
-  slist.innerHTML = '<div class="snote">正在读取全部机器的历史会话…</div>';
+  slist.innerHTML = '<div class="snote">'
+    + uiText('正在读取全部机器的历史会话…','Loading conversation history from all devices…') + '</div>';
   try{
     renderHistory(await api('GET','/api/history') || {machines:[],items:[]});
   }catch(e){
-    slist.innerHTML = '<div class="snote">读取失败：' + esc(e.message) + '</div>';
+    slist.innerHTML = '<div class="snote">' + uiText('读取失败：','Load failed: ')
+      + esc(e.message) + '</div>';
   }
 }
 async function importCopilot(id){
@@ -1034,9 +1148,9 @@ async function importCopilot(id){
     sid = s.id; localStorage.setItem('cb_sid', sid);
     await loadSessions();       // refresh the local list (now includes the imported one)
     await openSession(sid);     // load + render its full transcript
-  }catch(e){ alert('导入失败：' + e.message); }
+  }catch(e){ alert(uiText('导入失败：','Import failed: ') + e.message); }
 }
-async function openSession(id, turnToReveal){
+async function openSession(id, turnToReveal, messageToReveal){
   try{
     // Re-sync from the server on (re)select: this merges any turns made by
     // talking to Copilot directly on the host into the server store, so the
@@ -1047,28 +1161,28 @@ async function openSession(id, turnToReveal){
     sid = s.id; localStorage.setItem('cb_sid', sid);
     log.innerHTML = '';
     if(!s.messages || !s.messages.length){
-      addMsg('bot','新会话已就绪 ✨ 发条指令试试。');
+      addMsg('bot',uiText('新会话已就绪。发条指令试试。','New conversation ready. Send an instruction to begin.'));
     } else {
       for(const m of s.messages){
         const kind = m.role === 'user' ? 'user' : (m.ok === false ? 'err' : 'bot');
         const imgs = (m.attachments || []).filter(a => a && a.url).map(a => ({ src: attUrl(a), name: a.name }));
-        addMsg(kind, m.text || '', imgs, m.turnId);
+        addMsg(kind, m.text || '', imgs, m.turnId, m.id);
       }
     }
     renderSessions(); closeDrawer(); closeTimeline(); closeInbox();
     await loadTimeline(turnToReveal);
-    updateLocation(turnToReveal || '');
-    if(turnToReveal){
-      requestAnimationFrame(()=>{
-        const target = findTurnElement(turnToReveal);
+    updateLocation(turnToReveal || '', messageToReveal || '');
+    if(turnToReveal || messageToReveal){
+      setTimeout(()=>{
+        const target = findMessageElement(messageToReveal) || findTurnElement(turnToReveal);
         if(target){
           target.scrollIntoView({ block:'start' });
           target.classList.add('turn-flash');
           setTimeout(()=>target.classList.remove('turn-flash'), 1400);
         }
-      });
+      }, 0);
     }
-  }catch(e){ addMsg('err','打开会话失败：' + e.message); }
+  }catch(e){ addMsg('err',uiText('打开会话失败：','Could not open conversation: ') + e.message); }
 }
 async function newSession(){
   try{
@@ -1076,17 +1190,20 @@ async function newSession(){
     sid = s.id; localStorage.setItem('cb_sid', sid);
     await loadSessions();
     turns = []; renderTimeline();
-    log.innerHTML = ''; addMsg('bot','已开始新会话 ✨'); closeDrawer(); closeTimeline(); closeInbox(); updateLocation('');
-  }catch(e){ addMsg('err','新建会话失败：' + e.message); }
+    log.innerHTML = ''; addMsg('bot',uiText('已开始新会话。','New conversation started.')); closeDrawer(); closeTimeline(); closeInbox(); updateLocation('');
+  }catch(e){ addMsg('err',uiText('新建会话失败：','Could not create conversation: ') + e.message); }
 }
 async function delSession(id, title){
-  if(!confirm('删除会话「' + title + '」？此操作不可恢复。')) return;
+  if(!confirm(uiText(
+    '删除会话「' + title + '」？此操作不可恢复。',
+    'Delete conversation “' + title + '”? This cannot be undone.',
+  ))) return;
   try{
     await api('DELETE','/api/sessions/' + encodeURIComponent(id));
     if(id === sid){ sid = ''; localStorage.removeItem('cb_sid'); }
     await loadSessions();
     if(!sid){ sessions.length ? openSession(sessions[0].id) : newSession(); }
-  }catch(e){ addMsg('err','删除失败：' + e.message); }
+  }catch(e){ addMsg('err',uiText('删除失败：','Delete failed: ') + e.message); }
 }
 async function ensureSession(){
   if(sid){
@@ -1134,7 +1251,7 @@ async function send(text){
     thinking = addThinking(start);
     const res = await poll(start.jobId, thinking);
     thinking._stop(); thinking.remove();
-    addMsg(res.ok === false ? 'err' : 'bot', res.reply || '(无输出)');
+    addMsg(res.ok === false ? 'err' : 'bot', res.reply || uiText('(无输出)','(no output)'));
     if(res.inboxItemId && document.visibilityState === 'visible'){
       try{ await api('PATCH','/api/inbox/'+encodeURIComponent(res.inboxItemId),{status:'seen'}); }catch(_){ }
     }
@@ -1143,8 +1260,9 @@ async function send(text){
     loadDashboard(true);
   }catch(e){
     if(thinking){ thinking._stop(); thinking.remove(); }
-    if(e.message === 'unauthorized') addMsg('err','未授权：请点右上角 ⚙ 填写正确的 API Token');
-    else addMsg('err','连接失败：' + e.message + '（确认 server 和 devtunnel 都在运行）');
+    if(e.message === 'unauthorized') addMsg('err',uiText('未授权：请点右上角设置并填写正确的 API Token','Unauthorized. Open Settings and enter the correct API token.'));
+    else addMsg('err',uiText('连接失败：','Connection failed: ') + e.message
+      + uiText('（确认 server 和 devtunnel 都在运行）',' (confirm that the server and Dev Tunnel are running)'));
   }finally{
     updateSendEnabled();
   }
@@ -1174,6 +1292,7 @@ async function initAuth(cfg){
   authCfg = cfg || {};
   const e = authCfg.entra;
   msalApp = null; msAccount = null;
+  msToken = ''; msTokenExp = 0;
   if(!e || !e.clientId || !(e.authority || e.tenantId) || typeof msal === 'undefined') return;
   try{
     msalApp = new msal.PublicClientApplication({
@@ -1214,9 +1333,9 @@ async function acquireToken(silentOnly){
   }
 }
 async function signIn(){
-  if(!msalApp){ addMsg('err','此服务未配置 Microsoft 登录。'); return; }
+  if(!msalApp){ addMsg('err',uiText('此服务未配置 Microsoft 登录。','Microsoft sign-in is not configured for this service.')); return; }
   try{ await msalApp.loginRedirect({ scopes: msScopes() }); }
-  catch(err){ addMsg('err','登录失败：' + ((err && err.message) || err)); }
+  catch(err){ addMsg('err',uiText('登录失败：','Sign-in failed: ') + ((err && err.message) || err)); }
 }
 async function signOut(){
   msToken=''; msTokenExp=0;
@@ -1234,7 +1353,18 @@ function updateAuthUI(){
   const si = $('#msSignIn'), so = $('#msSignOut'), st = $('#msStatus');
   if(si) si.style.display = signedIn ? 'none' : '';
   if(so) so.style.display = signedIn ? '' : 'none';
-  if(st) st.textContent = signedIn ? ('已登录：' + (msAccount.username || msAccount.name || '')) : '未登录';
+  if(st) st.textContent = signedIn
+    ? (uiText('已登录：','Signed in: ') + (msAccount.username || msAccount.name || ''))
+    : uiText('未登录','Not signed in');
+  if(!authCfg){
+    setUiText('#connectionSettingsHint','正在读取服务器认证模式…','Loading the server authentication policy…');
+  }else if(mode === 'tunnel'){
+    setUiText('#connectionSettingsHint','本机 localhost 无需登录；远程访问由私有 Dev Tunnel 验证 Microsoft 账户。','Localhost requires no sign-in. Remote access is authenticated by the private Microsoft Dev Tunnel.');
+  }else if(mode === 'entra' || mode === 'both'){
+    setUiText('#connectionSettingsHint','此服务启用了额外的应用层 Microsoft 登录，与 Dev Tunnel 登录不同。若个人本机不需要再次登录，请在服务器控制台点击“Fix local sign-in”；远程微软账户验证仍保留。','Extra application-level Microsoft sign-in is enabled, separately from Dev Tunnel sign-in. For personal local use, select “Fix local sign-in” in the server Control Panel; remote Microsoft authentication is retained.');
+  }else{
+    setUiText('#connectionSettingsHint','此服务使用 API Token 认证。个人本机可在服务器控制台点击“Fix local sign-in”恢复本机免登录、远程微软验证。','This server uses API-token authentication. For personal local use, “Fix local sign-in” in the server Control Panel restores local access while retaining remote Microsoft authentication.');
+  }
 }
 
 /* ---------- settings ---------- */
@@ -1243,6 +1373,7 @@ function openModal(){
   $('#baseInput').value = base;
   $('#tokenInput').value = token;
   $('#previewLengthInput').value = appSettings.promptPreviewLength || 200;
+  $('#uiLanguageInput').value = uiLanguage;
   updateAuthUI(); modal.classList.add('show');
 }
 $('#setBtn').onclick = openModal;
@@ -1254,15 +1385,22 @@ $('#saveBtn').onclick = async ()=>{
   token = $('#tokenInput').value.trim();
   localStorage.setItem('cb_base', base); localStorage.setItem('cb_token', token);
   const previewLength = Number($('#previewLengthInput').value);
+  const requestedLanguage = $('#uiLanguageInput').value;
   if(!Number.isInteger(previewLength) || previewLength < 20 || previewLength > 1000){
-    alert('预览字符数必须是 20 到 1000 之间的整数。');
+    alert(uiText('预览字符数必须是 20 到 1000 之间的整数。','Preview length must be an integer from 20 to 1000.'));
     return;
   }
   try{
-    appSettings = await api('PATCH','/api/settings',{ promptPreviewLength: previewLength });
+    appSettings = await api('PATCH','/api/settings',{
+      promptPreviewLength: previewLength, uiLanguage: requestedLanguage,
+    });
+    localStorage.setItem('cb_ui_language', requestedLanguage);
+    if(requestedLanguage !== uiLanguage){ location.reload(); return; }
+    uiLanguage = requestedLanguage;
+    applyBaseUiLanguage();
     modal.classList.remove('show');
     await boot(true);
-  }catch(e){ alert('保存设置失败：' + e.message); }
+  }catch(e){ alert(uiText('保存设置失败：','Could not save settings: ') + e.message); }
 };
 
 /* ---------- boot ---------- */
@@ -1270,7 +1408,7 @@ async function boot(quiet){
   let cfg;
   try{
     cfg = await api('GET','/api/webconfig');
-  }catch(e){ if(!quiet) addMsg('err','连不上服务器：' + e.message); return; }
+  }catch(e){ if(!quiet) addMsg('err',uiText('连不上服务器：','Could not connect to server: ') + e.message); return; }
   await initAuth(cfg);
   const mode = cfg.authMode || (cfg.authRequired ? 'apikey' : 'none');
   if(mode === 'tunnel'){
@@ -1279,24 +1417,38 @@ async function boot(quiet){
   }
   updateAuthUI();
   if(mode === 'entra'){
-    if(!msToken){ addMsg('bot','请用 Microsoft 账号登录（点右上角 ⚙）。'); openModal(); return; }
+    if(!msToken){ addMsg('bot',uiText('请用 Microsoft 账号登录（点右上角设置）。','Sign in with a Microsoft account from Settings.')); openModal(); return; }
   } else if(mode === 'both'){
-    if(!msToken && !token){ addMsg('bot','请用 Microsoft 账号登录，或填写 API Token（点右上角 ⚙）。'); openModal(); return; }
+    if(!msToken && !token){ addMsg('bot',uiText('请用 Microsoft 账号登录，或在设置中填写 API Token。','Sign in with Microsoft or enter an API token in Settings.')); openModal(); return; }
   } else {
-    if(cfg.authRequired && !token){ addMsg('bot','⚠️ 这个服务需要 API Token，请点右上角 ⚙ 填写。'); openModal(); return; }
+    if(cfg.authRequired && !token){ addMsg('bot',uiText('这个服务需要 API Token，请在设置中填写。','This service requires an API token. Enter it in Settings.')); openModal(); return; }
   }
-  try{ appSettings = await api('GET','/api/settings'); }catch(_){ appSettings = { promptPreviewLength: 200 }; }
+  try{ appSettings = await api('GET','/api/settings'); }
+  catch(_){ appSettings = { promptPreviewLength: 200, uiLanguage }; }
+  const serverLanguage = appSettings.uiLanguage === 'en' ? 'en' : 'zh';
+  if(serverLanguage !== uiLanguage){
+    localStorage.setItem('cb_ui_language', serverLanguage);
+    location.reload();
+    return;
+  }
+  uiLanguage = serverLanguage;
+  applyBaseUiLanguage();
   await loadDashboard(false);
   if(!dashboardTimer) dashboardTimer=setInterval(()=>loadDashboard(true),5000);
   await loadSessions();
   if(sessions.length){
     const targetSession = sessions.some(s=>s.id===sid) ? sid : sessions[0].id;
     const targetTurn = targetSession === sid ? initialTurnId : '';
+    const targetMessage = targetSession === sid ? initialMessageId : '';
     initialTurnId = '';
-    await openSession(targetSession, targetTurn);
+    initialMessageId = '';
+    await openSession(targetSession, targetTurn, targetMessage);
   }
   else await newSession();
-  if(initialParams.get('dashboard') === '1') await openInbox();
+  if(initialParams.get('dashboard') === '1'
+    && (!document.body.dataset.productView || document.body.dataset.productView === 'inbox')){
+    await openInbox();
+  }
   if(initialParams.get('notificationSetup') === '1' && 'Notification' in window && Notification.permission === 'default'){
     $('#enableNotifyBtn').focus();
   }else if(initialParams.get('syncSetup') === '1' && dashboardState && dashboardState.sync && !dashboardState.sync.auth.connected){
@@ -1311,5 +1463,6 @@ document.addEventListener('visibilitychange', ()=>{
 
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
 </script>
+<script src="/v23.js"></script>
 </body>
 </html>

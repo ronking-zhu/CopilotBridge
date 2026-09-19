@@ -64,8 +64,9 @@ def main() -> None:
 
     source = inspect.getsource(gui.run_control_panel)
     for required in (
-        "/api/sync/status", "/api/sync/connect", "/api/sync/run",
-        "/api/sync/disconnect", "Open AI Dashboard", "Upload + download now",
+        "/api/control/sync/status", "/api/control/sync/connect", "/api/control/sync/run",
+        "/api/control/sync/disconnect", "Open AI Dashboard", "Upload + download now",
+        "Fix local sign-in", "_control_panel_key(cfg)", "validate_local_web_access(cfg)",
     ):
         assert required in source, required
 

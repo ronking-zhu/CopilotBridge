@@ -7,6 +7,7 @@ import asyncio
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 _SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SERVER_DIR not in sys.path:
@@ -69,21 +70,56 @@ async def main() -> None:
             assert turns[0]["messageCount"] == 2
 
             response = await client.get("/api/settings", headers=headers())
-            assert (await response.json())["promptPreviewLength"] == 200
+            defaults = await response.json()
+            assert defaults["promptPreviewLength"] == 200
+            assert defaults["uiLanguage"] == "zh"
             response = await client.patch(
-                "/api/settings", json={"promptPreviewLength": 300}, headers=headers()
+                "/api/settings", json={
+                    "promptPreviewLength": 300, "uiLanguage": "en",
+                }, headers=headers()
             )
             assert response.status == 200
-            assert (await response.json())["promptPreviewLength"] == 300
+            updated = await response.json()
+            assert updated["promptPreviewLength"] == 300
+            assert updated["uiLanguage"] == "en"
 
             response = await client.patch(
                 "/api/settings", json={"promptPreviewLength": 5}, headers=headers()
+            )
+            assert response.status == 400
+            response = await client.patch(
+                "/api/settings", json={"uiLanguage": "fr"}, headers=headers()
             )
             assert response.status == 400
             response = await client.get("/api/settings")
             assert response.status == 401
         finally:
             await client.close()
+
+    webapp = Path(_SERVER_DIR) / "webapp"
+    html = (webapp / "index.html").read_text(encoding="utf-8")
+    product_js = (webapp / "v23.js").read_text(encoding="utf-8")
+    product_css = (webapp / "v23.css").read_text(encoding="utf-8")
+    service_worker = (webapp / "sw.js").read_text(encoding="utf-8")
+    assert 'id="timelineBtn"' in html
+    assert "$('#timelineBtn').onclick = openTimeline;" in html
+    assert "initialParams.get('message')" in html
+    assert "wrap.dataset.messageId = messageId" in html
+    assert "findMessageElement(messageToReveal)" in html
+    assert "url.searchParams.set('message', messageId)" in html
+    assert "url.searchParams.delete('knowledge')" in html
+    assert "timeline.inert = false" in html
+    assert "timeline.inert = true" in html
+    assert 'id="uiLanguageInput"' in html
+    assert "window.cbUiText = uiText" in html
+    assert "localStorage.setItem('cb_ui_language'" in html
+    assert "addMsg(kind, m.text || ''" in html
+    assert "const v23T =" in product_js
+    assert "Interface language" in product_js
+    assert "Translates product UI, not conversation content" in product_js
+    assert "#v23GlobalSearch, #v23SyncIndicator { display: none; }" in product_css
+    assert "#v23GlobalSearch, #v23SyncIndicator, #timelineBtn" not in product_css
+    assert "copilot-bridge-v267-dashboard-controls" in service_worker
     print("ALL PROMPT TIMELINE API TESTS PASSED")
 
 

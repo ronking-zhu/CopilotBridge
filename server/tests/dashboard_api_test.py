@@ -7,6 +7,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 
 _SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SERVER_DIR not in sys.path:
@@ -72,9 +73,39 @@ async def main() -> None:
         client = TestClient(TestServer(app))
         await client.start_server()
         try:
+            shell_response = await client.get("/?dashboard=1")
+            assert shell_response.status == 200
+            shell = await shell_response.text()
+            assert 'id="dashboardLink"' in shell
+            assert 'href="/?dashboard=1"' in shell
+            assert "http://localhost" not in shell.split('id="dashboardLink"', 1)[1].split("</a>", 1)[0]
+
             created = await (await client.post(
                 "/api/sessions", json={"title": "Dashboard conversation"}
             )).json()
+            organized_response = await client.patch(
+                f"/api/sessions/{created['id']}", json={
+                    "isFavorite": True,
+                    "isPinned": True,
+                    "project": "Bridge",
+                    "labels": ["Release", "Windows"],
+                },
+            )
+            assert organized_response.status == 200
+            organized = await organized_response.json()
+            assert organized["isFavorite"] is True
+            assert organized["isPinned"] is True
+            assert organized["project"] == "Bridge"
+            assert organized["labels"] == ["Release", "Windows"]
+            invalid_combination = await client.patch(
+                f"/api/sessions/{created['id']}",
+                json={"title": "Partially changed", "labels": "invalid"},
+            )
+            assert invalid_combination.status == 400
+            unchanged = await (await client.get(
+                f"/api/sessions/{created['id']}"
+            )).json()
+            assert unchanged["title"] == "Dashboard conversation"
             start = await (await client.post("/api/chat", json={
                 "message": "run a task", "conversationId": created["id"],
             })).json()
@@ -95,13 +126,32 @@ async def main() -> None:
             assert item["conversationId"] == created["id"]
             assert item["summary"] == "completed dashboard answer"
 
+            reminder_response = await client.post(
+                f"/api/inbox/{item['id']}/remind", json={"minutes": 30}
+            )
+            assert reminder_response.status == 200
+            reminder = await reminder_response.json()
+            assert reminder["status"] == "seen"
+            assert reminder["remindAt"] > time.time()
+
+            store = app["session_store"]
+            with store._lock, store._conn:
+                store._conn.execute(
+                    "UPDATE inbox_items SET remind_at=? WHERE id=?",
+                    (time.time() - 1, item["id"]),
+                )
+            due = await (await client.get("/api/inbox?status=unread")).json()
+            assert any(candidate["id"] == item["id"] for candidate in due["items"])
+            assert next(
+                candidate for candidate in due["items"] if candidate["id"] == item["id"]
+            )["remindAt"] is None
+
             response = await client.patch(
                 f"/api/inbox/{item['id']}", json={"status": "seen"}
             )
             assert response.status == 200
             assert (await response.json())["status"] == "seen"
 
-            store = app["session_store"]
             store.create_inbox_item(
                 dedupe_key="native-test", source="vscode-insiders",
                 source_key="vscode-insiders:native", native_session_id="native",
@@ -117,11 +167,28 @@ async def main() -> None:
             assert (await response.json())["updated"] == 1
             assert (await (await client.get("/api/dashboard")).json())["unreadCount"] == 0
 
+            store.create_inbox_item(
+                dedupe_key="complete-all-test", source="bridge",
+                source_key="bridge:complete-all", title="Bulk complete",
+                summary="Complete this item",
+            )
+            response = await client.post("/api/inbox/complete-all")
+            assert response.status == 200
+            assert (await response.json())["updated"] >= 1
+            attention = await (await client.get(
+                "/api/inbox?status=unread,seen"
+            )).json()
+            assert attention["items"] == []
+
             sync_status = await client.get("/api/sync/status")
             assert sync_status.status == 200
             assert (await sync_status.json())["enabled"] is False
             sync_connect = await client.post("/api/sync/connect")
             assert sync_connect.status == 503
+            invalid = await client.patch(
+                f"/api/sessions/{created['id']}", json={"labels": "not-an-array"}
+            )
+            assert invalid.status == 400
         finally:
             await client.close()
     print("ALL DASHBOARD API TESTS PASSED")

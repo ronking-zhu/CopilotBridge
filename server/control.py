@@ -129,7 +129,7 @@ class Controller:
         """
         if not self.tunnel:
             return {"ok": False, "reason": "tunnel-unavailable", **self.status()}
-        ready, reason = self.tunnel.diagnose()
+        ready, reason = await asyncio.to_thread(self.tunnel.diagnose)
         if not ready:
             return {"ok": False, "reason": reason, **self.status()}
         if not self.tunnel.is_hosting():
@@ -164,7 +164,7 @@ class Controller:
                     elif (not paused) and (not hosting):
                         # Only auto-retry when hosting can actually succeed; e.g.
                         # don't spin every tick when the user isn't signed in.
-                        ready, _reason = self.tunnel.diagnose()
+                        ready, _reason = await asyncio.to_thread(self.tunnel.diagnose)
                         if not ready:
                             continue
                         logger.info("Dev Tunnel not running — re-hosting (watchdog).")

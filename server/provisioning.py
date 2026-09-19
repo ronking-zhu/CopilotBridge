@@ -234,6 +234,38 @@ def set_identity_config(env_path: Path | str = DEFAULT_ENV_PATH, **fields) -> di
     return written
 
 
+def validate_local_web_access(config, env_path: Path | str | None = None) -> None:
+    """Require loopback binding and an owner-only tunnel before removing web login.
+
+    Check both the running configuration and any persisted overrides. This is an
+    explicit desktop action, not a migration of somebody's custom Entra policy.
+    """
+    path = Path(env_path) if env_path is not None else DEFAULT_ENV_PATH
+    hosts = [getattr(config, "HOST", "localhost")]
+    stored_host = _read_env_value(path, "HOST")
+    if stored_host:
+        hosts.append(stored_host)
+    for host in hosts:
+        if str(host or "").strip().lower() not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("Local sign-in repair requires a loopback HOST (localhost).")
+    for tunnel_auth in (
+        getattr(config, "TUNNEL_AUTH", "private"), _read_env_value(path, "TUNNEL_AUTH"),
+    ):
+        if tunnel_auth and str(tunnel_auth).strip().lower() != "private":
+            raise ValueError("Local sign-in repair requires TUNNEL_AUTH=private (owner-only).")
+
+
+def configure_local_web_access(config, env_path: Path | str | None = None) -> dict:
+    """Explicitly restore the personal-use policy without changing secrets or data.
+
+    Call only after stopping the running server; a fresh process must load the new
+    policy. Entra registration/allowlist values remain available for opting back in.
+    """
+    path = Path(env_path) if env_path is not None else DEFAULT_ENV_PATH
+    validate_local_web_access(config, path)
+    return set_identity_config(env_path=path, auth_mode="tunnel")
+
+
 def set_port(port, env_path: Path | str = DEFAULT_ENV_PATH) -> int:
     """Persist the server listen ``PORT`` to ``.env`` (and ``os.environ``).
 

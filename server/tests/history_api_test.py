@@ -89,6 +89,13 @@ async def main() -> None:
                 assert native["sourceKey"] == "cli:native-1"
                 assert native["machineName"] == "History Laptop"
                 assert native["promptCount"] == 1
+                for asset, content_type in (
+                    ("/v23.css", "text/css"),
+                    ("/v23.js", "text/javascript"),
+                ):
+                    asset_response = await client.get(asset)
+                    assert asset_response.status == 200
+                    assert content_type in asset_response.headers.get("Content-Type", "")
             finally:
                 await client.close()
 
@@ -105,7 +112,13 @@ async def main() -> None:
         assert "sessionPromptCount(session) <= shortSessionPrompts" in html
         assert "SHORT_SESSION_PROMPTS" not in html
         assert "promptCount" in html
-        assert "copilot-bridge-v22" in service_worker
+        assert "copilot-bridge-v267-dashboard-controls" in service_worker
+        assert ".catch(() => {})" not in service_worker
+        assert "then(() => self.skipWaiting())" in service_worker
+        assert (webapp / "v23.css").is_file()
+        assert (webapp / "v23.js").is_file()
+        assert 'href="/v23.css"' in html
+        assert 'src="/v23.js"' in html
     finally:
         webchat.copilot_sessions.list_sessions = original_list
         if original_name is None:

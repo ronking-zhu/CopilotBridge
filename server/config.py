@@ -128,6 +128,38 @@ class DefaultConfig:
     OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
     OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "")
 
+    # --- Tool-free knowledge extraction ---
+    # Runs only on explicit user request. auto prefers Copilot CLI with an empty
+    # available-tools list, then falls back to the tool-free OpenAI API.
+    KNOWLEDGE_EXTRACTION_ENABLED = _as_bool(
+        os.environ.get("KNOWLEDGE_EXTRACTION_ENABLED"), True
+    )
+    KNOWLEDGE_EXTRACTION_PROVIDER = os.environ.get(
+        "KNOWLEDGE_EXTRACTION_PROVIDER", "auto"
+    ).strip().lower()
+    KNOWLEDGE_EXTRACTION_MODEL = os.environ.get("KNOWLEDGE_EXTRACTION_MODEL", "")
+    KNOWLEDGE_EXTRACTION_TIMEOUT = int(
+        os.environ.get("KNOWLEDGE_EXTRACTION_TIMEOUT", "180")
+    )
+    KNOWLEDGE_EXTRACTION_MAX_ITEMS = int(
+        os.environ.get("KNOWLEDGE_EXTRACTION_MAX_ITEMS", "12")
+    )
+    KNOWLEDGE_EXTRACTION_MAX_CHARS = int(
+        os.environ.get("KNOWLEDGE_EXTRACTION_MAX_CHARS", "45000")
+    )
+    KNOWLEDGE_EXTRACTION_MAX_MESSAGES = int(
+        os.environ.get("KNOWLEDGE_EXTRACTION_MAX_MESSAGES", "120")
+    )
+    KNOWLEDGE_MAP_MAX_CONVERSATIONS = int(
+        os.environ.get("KNOWLEDGE_MAP_MAX_CONVERSATIONS", "48")
+    )
+    KNOWLEDGE_MAP_MAX_CHARS = int(
+        os.environ.get("KNOWLEDGE_MAP_MAX_CHARS", "22000")
+    )
+    KNOWLEDGE_MAP_MAX_NODES = int(
+        os.environ.get("KNOWLEDGE_MAP_MAX_NODES", "48")
+    )
+
     # --- Persistent chat sessions ---
     # Directory holding one JSON file per conversation (the durable, server-owned
     # session store). EMPTY => default to <server dir>/sessions, resolved in webchat.

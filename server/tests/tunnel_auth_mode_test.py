@@ -8,7 +8,9 @@ import json
 import os
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -18,6 +20,8 @@ if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
 from auth import Authenticator
+from control import Controller
+from devtunnel import DevTunnel
 from gui import _identity_summary
 from provisioning import write_connection_card
 import webchat
@@ -72,6 +76,60 @@ def auth_config(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+async def assert_responsive_tunnel_operations() -> None:
+    loop = asyncio.get_running_loop()
+    event_loop_thread = threading.get_ident()
+
+    async def health(_request):
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_get("/health", health)
+    async with TestClient(TestServer(app)) as client:
+        for operation in ("host", "resume", "watchdog", "cancel-host"):
+            entered = asyncio.Event()
+            release = threading.Event()
+            stop = asyncio.Event()
+
+            def slow_cli():
+                loop.call_soon_threadsafe(entered.set)
+                assert threading.get_ident() != event_loop_thread, "CLI blocked the HTTP event loop"
+                assert release.wait(3), "Slow-CLI fixture was not released"
+                return True, ""
+
+            tunnel = DevTunnel("unused-fixture-executable", "fixture-tunnel", 13978)
+            tunnel.ensure = Mock(side_effect=slow_cli)
+            tunnel.diagnose = Mock(side_effect=slow_cli)
+            tunnel.is_hosting = Mock(return_value=False)
+            tunnel._host_once = AsyncMock(return_value="https://fixture.invalid")
+            controller = Controller(tunnel, auth_config(), Mock(), TOKEN, "fixture", None, "localhost", 13978)
+            with patch("control.tunnel_paused", return_value=False):
+                if operation in ("host", "cancel-host"):
+                    pending = asyncio.create_task(tunnel.host(retries=1))
+                else:
+                    tunnel.host = AsyncMock(return_value=None)
+                    pending = asyncio.create_task(
+                        controller.watchdog(stop, interval=0)
+                        if operation == "watchdog" else controller._ensure_hosting()
+                    )
+                try:
+                    await asyncio.wait_for(entered.wait(), timeout=1)
+                    if operation == "cancel-host":
+                        pending.cancel()
+                    response = await asyncio.wait_for(client.get("/health"), timeout=0.5)
+                    assert response.status == 200
+                    assert not pending.done(), "Slow CLI must stay pending without blocking HTTP"
+                finally:
+                    stop.set()
+                    release.set()
+                    results = await asyncio.gather(pending, return_exceptions=True)
+                if operation == "cancel-host":
+                    assert isinstance(results[0], asyncio.CancelledError)
+                    tunnel._host_once.assert_not_called()
+                else:
+                    assert not isinstance(results[0], BaseException), results[0]
 
 
 async def main() -> None:
@@ -139,6 +197,7 @@ async def main() -> None:
         finally:
             await client.close()
 
+    await assert_responsive_tunnel_operations()
     print("ALL TUNNEL AUTH MODE TESTS PASSED")
 
 

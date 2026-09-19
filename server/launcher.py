@@ -233,7 +233,7 @@ async def run(info_q=None) -> None:
         # must NOT call tkinter here (we're on a worker thread). In console/headless
         # mode, only a real console prompt would apply; we just honour the current
         # sign-in state. Either way: signed in => host; otherwise LAN-only.
-        if not candidate.is_logged_in():
+        if not await asyncio.to_thread(candidate.is_logged_in):
             _stage(6, "Dev Tunnel: not signed in. Server is up on the LAN; public "
                       "tunnel skipped. Sign in to Dev Tunnel and restart for a public URL.")
             # Keep the handle so the Control Panel can explain *why* (not signed in)

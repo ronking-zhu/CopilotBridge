@@ -43,19 +43,25 @@ $py   = Join-Path $root ".venv\Scripts\python.exe"
 $serverPy = Join-Path $root "server\.venv\Scripts\python.exe"
 $entry = Join-Path $root "server\launcher.py"
 $webapp = Join-Path $root "server\webapp"
+$versionFile = Join-Path $root "server\version.py"
 
 if (-not (Test-Path $py) -and (Test-Path $serverPy)) { $py = $serverPy }
 if (-not (Test-Path $py)) { throw "venv python not found - run scripts\install.ps1 first." }
+$versionMatch = Select-String -LiteralPath $versionFile `
+    -Pattern '^__version__\s*=\s*"([^"]+)"\s*$' | Select-Object -First 1
+if (-not $versionMatch) { throw "Product version not found in $versionFile." }
+$sourceVersion = $versionMatch.Matches[0].Groups[1].Value
 
 Write-Host "Ensuring PyInstaller is installed..." -ForegroundColor Cyan
 & $py -m pip install --quiet --disable-pip-version-check pyinstaller | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller installation failed with exit code $LASTEXITCODE." }
 
 # Hidden imports: launcher.py imports app/config/etc. inside functions, and
 # botbuilder/botframework are namespace packages PyInstaller needs help finding.
 $hidden = @(
     "app", "config", "webchat", "bot", "copilot_runner", "copilot_sessions",
     "session_store", "session_watcher", "onedrive_auth", "onedrive_local", "provisioning", "paths", "devtunnel", "setup", "gui",
-    "control", "auth", "version",
+    "control", "auth", "version", "knowledge_extractor",
     "providers", "providers.base", "providers.registry", "providers.copilot",
     "providers.claude", "providers.openai",
     "sync", "sync.engine", "sync.packages", "sync.coordinator", "sync.service",
@@ -95,6 +101,7 @@ $pyiArgs += $entry
 
 Write-Host "Building $Name ($mode, this can take a few minutes)..." -ForegroundColor Cyan
 & $py @pyiArgs
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE." }
 
 $exe = if ($OneFile) {
     Join-Path $root "dist\$Name.exe"
@@ -110,6 +117,8 @@ if (Test-Path $exe) {
     # repo's tools/ copy is missing. The setup wizard still handles the case where
     # it's absent at runtime.
     $exeDir   = Split-Path $exe -Parent
+    Set-Content -LiteralPath (Join-Path $exeDir "build-version.txt") `
+        -Value $sourceVersion -Encoding ascii -NoNewline
     $toolsDt  = Join-Path $root "tools\devtunnel.exe"
     if (-not (Test-Path $toolsDt)) {
         try {

@@ -23,6 +23,7 @@ Projected session shape (timestamps are epoch seconds, ``time.time()``)::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -36,6 +37,10 @@ logger = logging.getLogger("copilot_bridge.sessions")
 
 # Titles are a single trimmed line capped at ~60 characters.
 _TITLE_MAX = 60
+
+
+class SyncDependencyError(ValueError):
+    """A valid remote event depends on another package not applied yet."""
 
 
 def _now() -> float:
@@ -136,6 +141,15 @@ class SessionStore:
     DEFAULT_PROMPT_PREVIEW_LENGTH = 200
     MIN_PROMPT_PREVIEW_LENGTH = 20
     MAX_PROMPT_PREVIEW_LENGTH = 1000
+    KNOWLEDGE_TYPES = {
+        "summary", "fact", "decision", "procedure", "solution", "failure",
+        "code_pattern", "todo", "question",
+    }
+    KNOWLEDGE_STATUSES = {"draft", "verified", "conflicted", "superseded"}
+    KNOWLEDGE_GENERATION_STATUSES = {"queued", "running", "completed", "failed"}
+    KNOWLEDGE_GENERATION_PHASES = {
+        "queued", "extracting", "mapping", "completed", "failed",
+    }
 
     def __init__(self, sessions_dir: str, *, device_name: str = ""):
         self.dir = os.path.abspath(sessions_dir)
@@ -179,6 +193,11 @@ class SessionStore:
             CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL DEFAULT '',
+                is_favorite INTEGER NOT NULL DEFAULT 0 CHECK (is_favorite IN (0, 1)),
+                is_pinned INTEGER NOT NULL DEFAULT 0 CHECK (is_pinned IN (0, 1)),
+                project TEXT NOT NULL DEFAULT '',
+                labels_json TEXT NOT NULL DEFAULT '[]',
+                organization_updated_at REAL NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 deleted_at REAL
@@ -316,12 +335,106 @@ class SessionStore:
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 seen_at REAL,
+                remind_at REAL,
                 metadata_json TEXT
             );
             CREATE INDEX IF NOT EXISTS ix_inbox_items_status_created
                 ON inbox_items(status, created_at DESC);
 
-            PRAGMA user_version=1;
+            CREATE TABLE IF NOT EXISTS knowledge_items (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft'
+                    CHECK (status IN ('draft', 'verified', 'conflicted', 'superseded')),
+                project TEXT NOT NULL DEFAULT '',
+                labels_json TEXT NOT NULL DEFAULT '[]',
+                source_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+                current_version_id TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                deleted_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS ix_knowledge_items_updated
+                ON knowledge_items(status, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS knowledge_versions (
+                id TEXT PRIMARY KEY,
+                knowledge_id TEXT NOT NULL REFERENCES knowledge_items(id) ON DELETE CASCADE,
+                version_number INTEGER NOT NULL,
+                body_markdown TEXT NOT NULL,
+                input_digest TEXT NOT NULL,
+                extractor_version TEXT NOT NULL DEFAULT 'manual-v1',
+                confidence TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                UNIQUE(knowledge_id, version_number),
+                UNIQUE(knowledge_id, input_digest, extractor_version)
+            );
+            CREATE INDEX IF NOT EXISTS ix_knowledge_versions_item
+                ON knowledge_versions(knowledge_id, version_number DESC);
+
+            CREATE TABLE IF NOT EXISTS knowledge_evidence (
+                id TEXT PRIMARY KEY,
+                knowledge_id TEXT NOT NULL REFERENCES knowledge_items(id) ON DELETE CASCADE,
+                version_id TEXT NOT NULL REFERENCES knowledge_versions(id) ON DELETE CASCADE,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                branch_id TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+                turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+                message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                snippet TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                UNIQUE(version_id, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS ix_knowledge_evidence_message
+                ON knowledge_evidence(message_id, knowledge_id);
+
+            CREATE TABLE IF NOT EXISTS knowledge_extraction_runs (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                extractor_version TEXT NOT NULL,
+                input_digest TEXT NOT NULL,
+                source_message_ids_json TEXT NOT NULL,
+                result_item_ids_json TEXT NOT NULL DEFAULT '[]',
+                created_at REAL NOT NULL,
+                UNIQUE(conversation_id, extractor_version, input_digest)
+            );
+            CREATE INDEX IF NOT EXISTS ix_knowledge_extraction_runs_conversation
+                ON knowledge_extraction_runs(conversation_id, extractor_version, created_at);
+            CREATE TABLE IF NOT EXISTS knowledge_maps (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                map_json TEXT NOT NULL,
+                input_digest TEXT NOT NULL,
+                extractor_version TEXT NOT NULL,
+                source_message_ids_json TEXT NOT NULL DEFAULT '[]',
+                source_conversation_count INTEGER NOT NULL DEFAULT 0,
+                source_message_count INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS knowledge_generation_jobs (
+                conversation_id TEXT PRIMARY KEY
+                    REFERENCES conversations(id) ON DELETE CASCADE,
+                status TEXT NOT NULL
+                    CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+                phase TEXT NOT NULL
+                    CHECK (phase IN ('queued', 'extracting', 'mapping', 'completed', 'failed')),
+                processed_message_count INTEGER NOT NULL DEFAULT 0,
+                remaining_message_count INTEGER NOT NULL DEFAULT 0,
+                generated_item_count INTEGER NOT NULL DEFAULT 0,
+                max_conversations INTEGER NOT NULL DEFAULT 48,
+                result_map_id TEXT,
+                error TEXT NOT NULL DEFAULT '',
+                started_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                completed_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS ix_knowledge_generation_jobs_status
+                ON knowledge_generation_jobs(status, updated_at DESC);
+
+            PRAGMA user_version=6;
             """
         )
         watch_columns = {
@@ -334,6 +447,36 @@ class SessionStore:
                 "ALTER TABLE native_watch_cursors "
                 "ADD COLUMN notified_assistant_fingerprint TEXT"
             )
+        conversation_columns = {
+            row[1] for row in self._conn.execute(
+                "PRAGMA table_info(conversations)"
+            ).fetchall()
+        }
+        for column, definition in (
+            ("is_favorite", "INTEGER NOT NULL DEFAULT 0"),
+            ("is_pinned", "INTEGER NOT NULL DEFAULT 0"),
+            ("project", "TEXT NOT NULL DEFAULT ''"),
+            ("labels_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("organization_updated_at", "REAL NOT NULL DEFAULT 0"),
+        ):
+            if column not in conversation_columns:
+                self._conn.execute(
+                    f"ALTER TABLE conversations ADD COLUMN {column} {definition}"
+                )
+        inbox_columns = {
+            row[1] for row in self._conn.execute(
+                "PRAGMA table_info(inbox_items)"
+            ).fetchall()
+        }
+        if "remind_at" not in inbox_columns:
+            self._conn.execute("ALTER TABLE inbox_items ADD COLUMN remind_at REAL")
+        interrupted_at = _now()
+        self._conn.execute(
+            "UPDATE knowledge_generation_jobs SET status='failed', phase='failed', "
+            "error='Generation interrupted by server restart.', updated_at=?, "
+            "completed_at=? WHERE status IN ('queued', 'running')",
+            (interrupted_at, interrupted_at),
+        )
         self._conn.commit()
 
     def close(self) -> None:
@@ -555,6 +698,11 @@ class SessionStore:
             "updatedAt": session.get("updatedAt"),
             "messageCount": session.get("messageCount", 0),
             "promptCount": session.get("promptCount", 0),
+            "isFavorite": bool(session.get("isFavorite")),
+            "isPinned": bool(session.get("isPinned")),
+            "project": session.get("project", ""),
+            "labels": list(session.get("labels") or []),
+            "awaitingResponse": bool(session.get("awaitingResponse")),
         }
         for key in ("machineId", "machineName"):
             if session.get(key):
@@ -594,6 +742,10 @@ class SessionStore:
             "SELECT * FROM messages WHERE branch_id=? ORDER BY ordinal", (branch_id,)
         ).fetchall()
         messages = [self._message_dict(message) for message in message_rows]
+        try:
+            labels = json.loads(row["labels_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            labels = []
         return {
             "id": row["id"],
             "title": row["title"],
@@ -601,6 +753,11 @@ class SessionStore:
             "updatedAt": row["updated_at"],
             "messageCount": len(messages),
             "promptCount": sum(message["role"] == "user" for message in messages),
+            "isFavorite": bool(row["is_favorite"]),
+            "isPinned": bool(row["is_pinned"]),
+            "project": row["project"],
+            "labels": labels if isinstance(labels, list) else [],
+            "awaitingResponse": bool(messages and messages[-1]["role"] == "user"),
             "branchId": branch_id,
             "machineId": machine_id,
             "machineName": self._device_name(machine_id),
@@ -708,18 +865,26 @@ class SessionStore:
             rows = self._conn.execute(
                 "SELECT c.*, COUNT(m.id) AS message_count, "
                 "SUM(CASE WHEN m.role='user' THEN 1 ELSE 0 END) AS prompt_count, "
+                "(SELECT mm.role FROM messages mm WHERE mm.branch_id=b.id "
+                "ORDER BY mm.ordinal DESC LIMIT 1) AS last_role, "
                 "b.origin_device_id AS machine_id, d.name AS machine_name "
                 "FROM conversations c "
                 "LEFT JOIN branches b ON b.conversation_id=c.id AND b.is_main=1 "
                 "LEFT JOIN devices d ON d.id=b.origin_device_id "
                 "LEFT JOIN messages m ON m.branch_id=b.id "
-                "WHERE c.deleted_at IS NULL GROUP BY c.id ORDER BY c.updated_at DESC"
+                "WHERE c.deleted_at IS NULL GROUP BY c.id "
+                "ORDER BY c.is_pinned DESC, c.is_favorite DESC, c.updated_at DESC"
             ).fetchall()
             return [{
                 "id": row["id"], "title": row["title"],
                 "createdAt": row["created_at"], "updatedAt": row["updated_at"],
                 "messageCount": row["message_count"],
                 "promptCount": row["prompt_count"],
+                "isFavorite": bool(row["is_favorite"]),
+                "isPinned": bool(row["is_pinned"]),
+                "project": row["project"],
+                "labels": json.loads(row["labels_json"] or "[]"),
+                "awaitingResponse": row["last_role"] == "user",
                 "machineId": row["machine_id"],
                 "machineName": row["machine_name"] or f"Device {str(row['machine_id'])[:8]}",
             } for row in rows]
@@ -804,6 +969,11 @@ class SessionStore:
                 existing = self.create(session_id=sid)
             with self._conn:
                 branch_id = self._main_branch_id(sid)
+                evidence_rows = [dict(row) for row in self._conn.execute(
+                    "SELECT e.* FROM knowledge_evidence e "
+                    "JOIN messages m ON m.id=e.message_id WHERE m.branch_id=?",
+                    (branch_id,),
+                ).fetchall()]
                 old_rows = self._conn.execute(
                     "SELECT id FROM messages WHERE branch_id=?", (branch_id,)
                 ).fetchall()
@@ -812,6 +982,26 @@ class SessionStore:
                 self._conn.execute("DELETE FROM turns WHERE branch_id=?", (branch_id,))
                 inserted = self._insert_transcript(sid, branch_id, messages or [])
                 new_ids = {message["id"] for message in inserted}
+                for evidence in evidence_rows:
+                    source = self._conn.execute(
+                        "SELECT conversation_id, branch_id, turn_id, text "
+                        "FROM messages WHERE id=?",
+                        (evidence["message_id"],),
+                    ).fetchone()
+                    if source is None:
+                        continue
+                    self._conn.execute(
+                        "INSERT INTO knowledge_evidence(id, knowledge_id, version_id, "
+                        "conversation_id, branch_id, turn_id, message_id, snippet, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            evidence["id"], evidence["knowledge_id"],
+                            evidence["version_id"], source["conversation_id"],
+                            source["branch_id"], source["turn_id"],
+                            evidence["message_id"], self._preview(source["text"], 320),
+                            evidence["created_at"],
+                        ),
+                    )
                 latest = max(
                     [message.get("ts") or 0 for message in inserted]
                     + [existing.get("updatedAt") or 0, updated_at or 0, _now()]
@@ -835,20 +1025,104 @@ class SessionStore:
         return self.get(sid)
 
     def rename(self, session_id: str, title: str) -> dict | None:
+        return self.update_metadata(session_id, {"title": title})
+
+    @staticmethod
+    def _normalize_labels(value) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError("labels must be an array")
+        labels: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("each label must be a string")
+            label = " ".join(item.split())
+            if not label:
+                continue
+            if len(label) > 32:
+                raise ValueError("labels must be at most 32 characters")
+            if label.casefold() not in {existing.casefold() for existing in labels}:
+                labels.append(label)
+        if len(labels) > 20:
+            raise ValueError("a conversation can have at most 20 labels")
+        return labels
+
+    def _normalize_organization_changes(self, changes: dict) -> dict:
+        if not isinstance(changes, dict):
+            raise ValueError("organization changes must be an object")
+        allowed = {"isFavorite", "isPinned", "project", "labels"}
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"unknown organization field(s): {', '.join(sorted(unknown))}")
+        if not changes:
+            raise ValueError("at least one organization field is required")
+        for key in ("isFavorite", "isPinned"):
+            if key in changes and not isinstance(changes[key], bool):
+                raise ValueError(f"{key} must be a boolean")
+        if "project" in changes:
+            if not isinstance(changes["project"], str):
+                raise ValueError("project must be a string")
+            project = " ".join(changes["project"].split())
+            if len(project) > 80:
+                raise ValueError("project must be at most 80 characters")
+            changes = {**changes, "project": project}
+        if "labels" in changes:
+            changes = {**changes, "labels": self._normalize_labels(changes["labels"])}
+        return changes
+
+    def update_organization(self, session_id: str, changes: dict) -> dict | None:
+        return self.update_metadata(
+            session_id, self._normalize_organization_changes(changes)
+        )
+
+    def update_metadata(self, session_id: str, changes: dict) -> dict | None:
         sid = self._norm_id(session_id)
+        if not isinstance(changes, dict):
+            raise ValueError("session changes must be an object")
+        allowed = {"title", "isFavorite", "isPinned", "project", "labels"}
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"unknown session field(s): {', '.join(sorted(unknown))}")
+        if not changes:
+            raise ValueError("at least one field is required")
+        if "title" in changes and not isinstance(changes["title"], str):
+            raise ValueError("title must be a string")
+        organization = {
+            key: changes[key] for key in allowed - {"title"} if key in changes
+        }
+        if organization:
+            organization = self._normalize_organization_changes(organization)
         with self._lock, self._conn:
-            if not self._conn.execute(
-                "SELECT 1 FROM conversations WHERE id=? AND deleted_at IS NULL", (sid,)
-            ).fetchone():
+            row = self._conn.execute(
+                "SELECT * FROM conversations WHERE id=? AND deleted_at IS NULL", (sid,)
+            ).fetchone()
+            if row is None:
                 return None
+            title = changes.get("title", row["title"]).strip()
+            favorite = bool(organization.get("isFavorite", row["is_favorite"]))
+            pinned = bool(organization.get("isPinned", row["is_pinned"]))
+            project = organization.get("project", row["project"])
+            labels = organization.get("labels", json.loads(row["labels_json"] or "[]"))
             now = _now()
             self._conn.execute(
-                "UPDATE conversations SET title=?, updated_at=? WHERE id=?",
-                (title or "", now, sid),
+                "UPDATE conversations SET title=?, is_favorite=?, is_pinned=?, "
+                "project=?, labels_json=?, updated_at=?, organization_updated_at=? "
+                "WHERE id=?",
+                (
+                    title, int(favorite), int(pinned), project,
+                    json.dumps(labels, ensure_ascii=False),
+                    now if "title" in changes else row["updated_at"],
+                    now if organization else row["organization_updated_at"], sid,
+                ),
             )
-            self._record_event("conversation", sid, "updated", {
-                "id": sid, "title": title or "", "updatedAt": now,
-            })
+            if "title" in changes:
+                self._record_event("conversation", sid, "updated", {
+                    "id": sid, "title": title, "updatedAt": now,
+                })
+            if organization:
+                self._record_event("conversation", sid, "organized", {
+                    "id": sid, "isFavorite": favorite, "isPinned": pinned,
+                    "project": project, "labels": labels, "updatedAt": now,
+                })
         return self.get(sid)
 
     def delete(self, session_id: str) -> bool:
@@ -1035,6 +1309,7 @@ class SessionStore:
             "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],
             "seenAt": row["seen_at"],
+            "remindAt": row["remind_at"],
             "metadata": metadata,
         }
 
@@ -1083,6 +1358,7 @@ class SessionStore:
 
     def list_inbox_items(self, statuses: tuple[str, ...] = (),
                          limit: int = 100) -> list[dict]:
+        self._reactivate_due_reminders()
         limit = max(1, min(int(limit), 500))
         sql = "SELECT * FROM inbox_items"
         params: list = []
@@ -1096,6 +1372,7 @@ class SessionStore:
             return [self._inbox_dict(row) for row in rows]
 
     def inbox_unread_count(self) -> int:
+        self._reactivate_due_reminders()
         with self._lock:
             row = self._conn.execute(
                 "SELECT COUNT(*) AS value FROM inbox_items WHERE status='unread'"
@@ -1114,7 +1391,8 @@ class SessionStore:
                 return None
             seen_at = now if status != "unread" else None
             self._conn.execute(
-                "UPDATE inbox_items SET status=?, updated_at=?, seen_at=? WHERE id=?",
+                "UPDATE inbox_items SET status=?, updated_at=?, seen_at=?, remind_at=NULL "
+                "WHERE id=?",
                 (status, now, seen_at, item_id),
             )
             row = self._conn.execute(
@@ -1122,12 +1400,58 @@ class SessionStore:
             ).fetchone()
             return self._inbox_dict(row)
 
+    def remind_inbox_item(self, item_id: str, remind_at: float) -> dict | None:
+        try:
+            target = float(remind_at)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("remindAt must be a timestamp") from exc
+        now = _now()
+        if target <= now:
+            raise ValueError("remindAt must be in the future")
+        if target > now + 366 * 86400:
+            raise ValueError("remindAt must be within one year")
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM inbox_items WHERE id=?", (item_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            self._conn.execute(
+                "UPDATE inbox_items SET status='seen', updated_at=?, seen_at=?, remind_at=? "
+                "WHERE id=?",
+                (now, now, target, item_id),
+            )
+            row = self._conn.execute(
+                "SELECT * FROM inbox_items WHERE id=?", (item_id,)
+            ).fetchone()
+            return self._inbox_dict(row)
+
+    def _reactivate_due_reminders(self) -> int:
+        now = _now()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE inbox_items SET status='unread', updated_at=?, seen_at=NULL, "
+                "remind_at=NULL WHERE remind_at IS NOT NULL AND remind_at<=?",
+                (now, now),
+            )
+            return cursor.rowcount
+
     def mark_all_inbox_seen(self) -> int:
         now = _now()
         with self._lock, self._conn:
             cursor = self._conn.execute(
-                "UPDATE inbox_items SET status='seen', updated_at=?, seen_at=? "
+                "UPDATE inbox_items SET status='seen', updated_at=?, seen_at=?, remind_at=NULL "
                 "WHERE status='unread'",
+                (now, now),
+            )
+            return cursor.rowcount
+
+    def complete_all_inbox_items(self) -> int:
+        now = _now()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE inbox_items SET status='completed', updated_at=?, seen_at=?, "
+                "remind_at=NULL WHERE status IN ('unread', 'seen')",
                 (now, now),
             )
             return cursor.rowcount
@@ -1187,7 +1511,10 @@ class SessionStore:
     # -- prompt timeline / settings -------------------------------------
 
     def get_settings(self) -> dict:
-        settings = {"promptPreviewLength": self.DEFAULT_PROMPT_PREVIEW_LENGTH}
+        settings = {
+            "promptPreviewLength": self.DEFAULT_PROMPT_PREVIEW_LENGTH,
+            "uiLanguage": "zh",
+        }
         with self._lock:
             rows = self._conn.execute("SELECT key, value_json FROM settings").fetchall()
         for row in rows:
@@ -1200,7 +1527,7 @@ class SessionStore:
     def update_settings(self, changes: dict) -> dict:
         if not isinstance(changes, dict):
             raise ValueError("settings must be an object")
-        unknown = set(changes) - {"promptPreviewLength"}
+        unknown = set(changes) - {"promptPreviewLength", "uiLanguage"}
         if unknown:
             raise ValueError(f"unknown setting(s): {', '.join(sorted(unknown))}")
         if "promptPreviewLength" in changes:
@@ -1212,6 +1539,8 @@ class SessionStore:
                     f"promptPreviewLength must be between {self.MIN_PROMPT_PREVIEW_LENGTH} "
                     f"and {self.MAX_PROMPT_PREVIEW_LENGTH}"
                 )
+        if "uiLanguage" in changes and changes["uiLanguage"] not in {"zh", "en"}:
+            raise ValueError("uiLanguage must be 'zh' or 'en'")
         with self._lock, self._conn:
             for key, value in changes.items():
                 now = _now()
@@ -1275,6 +1604,1023 @@ class SessionStore:
                 "messageCount": row["message_count"],
             })
         return result
+
+    # -- versioned knowledge and message evidence ----------------------
+
+    @staticmethod
+    def _knowledge_version_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"], "knowledgeId": row["knowledge_id"],
+            "versionNumber": row["version_number"],
+            "bodyMarkdown": row["body_markdown"],
+            "inputDigest": row["input_digest"],
+            "extractorVersion": row["extractor_version"],
+            "confidence": row["confidence"], "createdAt": row["created_at"],
+            "evidenceCount": row["evidence_count"] if "evidence_count" in row.keys() else 0,
+        }
+
+    @staticmethod
+    def _knowledge_evidence_dict(row: sqlite3.Row) -> dict:
+        deep_link = f"/?conversation={row['conversation_id']}"
+        if row["turn_id"]:
+            deep_link += f"&turn={row['turn_id']}"
+        deep_link += f"&message={row['message_id']}"
+        return {
+            "id": row["id"], "knowledgeId": row["knowledge_id"],
+            "versionId": row["version_id"],
+            "conversationId": row["conversation_id"],
+            "conversationTitle": row["conversation_title"]
+            if "conversation_title" in row.keys() else "",
+            "branchId": row["branch_id"], "turnId": row["turn_id"],
+            "turnOrdinal": row["turn_ordinal"]
+            if "turn_ordinal" in row.keys() else None,
+            "messageId": row["message_id"],
+            "role": row["role"] if "role" in row.keys() else "",
+            "snippet": row["snippet"], "createdAt": row["created_at"],
+            "deepLink": deep_link,
+        }
+
+    @staticmethod
+    def _knowledge_item_dict(row: sqlite3.Row) -> dict:
+        try:
+            labels = json.loads(row["labels_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            labels = []
+        item = {
+            "id": row["id"], "type": row["type"], "title": row["title"],
+            "status": row["status"], "project": row["project"],
+            "labels": labels if isinstance(labels, list) else [],
+            "sourceConversationId": row["source_conversation_id"],
+            "currentVersionId": row["current_version_id"],
+            "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+            "deletedAt": row["deleted_at"],
+        }
+        if "body_markdown" in row.keys() and row["body_markdown"] is not None:
+            item["bodyMarkdown"] = row["body_markdown"]
+            item["versionNumber"] = row["version_number"]
+            item["confidence"] = row["confidence"]
+            item["extractorVersion"] = row["extractor_version"]
+            item["evidenceCount"] = row["evidence_count"]
+        return item
+
+    def _normalize_knowledge_fields(self, knowledge_type: str, title: str,
+                                    status: str, project: str, labels) -> tuple:
+        kind = str(knowledge_type or "").strip().lower()
+        if kind not in self.KNOWLEDGE_TYPES:
+            raise ValueError("unsupported knowledge type")
+        normalized_title = " ".join(str(title or "").split())
+        if not normalized_title or len(normalized_title) > 160:
+            raise ValueError("knowledge title must be between 1 and 160 characters")
+        normalized_status = str(status or "draft").strip().lower()
+        if normalized_status not in self.KNOWLEDGE_STATUSES:
+            raise ValueError("unsupported knowledge status")
+        normalized_project = " ".join(str(project or "").split())
+        if len(normalized_project) > 80:
+            raise ValueError("project must be at most 80 characters")
+        return (
+            kind, normalized_title, normalized_status, normalized_project,
+            self._normalize_labels(labels or []),
+        )
+
+    def _knowledge_sources(self, message_ids: list[str]) -> list[sqlite3.Row]:
+        ids = list(dict.fromkeys(str(value or "").strip() for value in message_ids or []))
+        ids = [value for value in ids if value]
+        if not ids:
+            raise ValueError("at least one evidence message is required")
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            "SELECT m.*, c.title AS conversation_title, t.ordinal AS turn_ordinal "
+            "FROM messages m JOIN conversations c ON c.id=m.conversation_id "
+            "LEFT JOIN turns t ON t.id=m.turn_id "
+            f"WHERE m.id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        by_id = {row["id"]: row for row in rows}
+        missing = [message_id for message_id in ids if message_id not in by_id]
+        if missing:
+            raise ValueError(f"unknown evidence message: {missing[0]}")
+        return [by_id[message_id] for message_id in ids]
+
+    @staticmethod
+    def _knowledge_digest(body_markdown: str, message_ids: list[str]) -> str:
+        source = json.dumps({
+            "bodyMarkdown": body_markdown,
+            "messageIds": sorted(message_ids),
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+    def _insert_knowledge_version(self, knowledge_id: str, body_markdown: str,
+                                  source_rows: list[sqlite3.Row], confidence: str,
+                                  extractor_version: str, input_digest: str,
+                                  version_id: str = "") -> str:
+        version_number = self._conn.execute(
+            "SELECT COALESCE(MAX(version_number), 0) + 1 AS value "
+            "FROM knowledge_versions WHERE knowledge_id=?",
+            (knowledge_id,),
+        ).fetchone()["value"]
+        version_id = version_id or str(uuid.uuid4())
+        now = _now()
+        self._conn.execute(
+            "INSERT INTO knowledge_versions(id, knowledge_id, version_number, "
+            "body_markdown, input_digest, extractor_version, confidence, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                version_id, knowledge_id, version_number, body_markdown,
+                input_digest, extractor_version, confidence, now,
+            ),
+        )
+        self._record_event("knowledge_version", version_id, "created", {
+            "id": version_id, "knowledgeId": knowledge_id,
+            "versionNumber": version_number, "bodyMarkdown": body_markdown,
+            "inputDigest": input_digest, "extractorVersion": extractor_version,
+            "confidence": confidence, "createdAt": now,
+        })
+        for source in source_rows:
+            evidence_id = str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"copilotbridge:knowledge-evidence:{version_id}:{source['id']}",
+            ))
+            snippet = self._preview(source["text"], 320)
+            self._conn.execute(
+                "INSERT INTO knowledge_evidence(id, knowledge_id, version_id, "
+                "conversation_id, branch_id, turn_id, message_id, snippet, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    evidence_id, knowledge_id, version_id, source["conversation_id"],
+                    source["branch_id"], source["turn_id"], source["id"], snippet, now,
+                ),
+            )
+            self._record_event("knowledge_evidence", evidence_id, "created", {
+                "id": evidence_id, "knowledgeId": knowledge_id,
+                "versionId": version_id,
+                "conversationId": source["conversation_id"],
+                "branchId": source["branch_id"], "turnId": source["turn_id"],
+                "messageId": source["id"], "snippet": snippet, "createdAt": now,
+            })
+        return version_id
+
+    def _renumber_knowledge_versions(self, knowledge_id: str) -> None:
+        rows = self._conn.execute(
+            "SELECT id FROM knowledge_versions WHERE knowledge_id=? "
+            "ORDER BY created_at, id",
+            (knowledge_id,),
+        ).fetchall()
+        for index, row in enumerate(rows, 1):
+            self._conn.execute(
+                "UPDATE knowledge_versions SET version_number=? WHERE id=?",
+                (-index, row["id"]),
+            )
+        for index, row in enumerate(rows, 1):
+            self._conn.execute(
+                "UPDATE knowledge_versions SET version_number=? WHERE id=?",
+                (index, row["id"]),
+            )
+
+    def create_knowledge_item(self, *, knowledge_type: str, title: str,
+                              body_markdown: str, evidence_message_ids: list[str],
+                              status: str = "draft", project: str = "", labels=None,
+                              confidence: str = "", extractor_version: str = "manual-v1",
+                              input_digest: str = "") -> dict:
+        kind, title, status, project, labels = self._normalize_knowledge_fields(
+            knowledge_type, title, status, project, labels
+        )
+        body = str(body_markdown or "").strip()
+        if not body:
+            raise ValueError("knowledge body is required")
+        extractor = str(extractor_version or "manual-v1").strip()[:80]
+        confidence = str(confidence or "").strip().lower()[:32]
+        with self._lock, self._conn:
+            sources = self._knowledge_sources(evidence_message_ids)
+            message_ids = [row["id"] for row in sources]
+            digest = str(input_digest or "").strip() or self._knowledge_digest(body, message_ids)
+            knowledge_id = str(uuid.uuid4())
+            version_id = str(uuid.uuid4())
+            now = _now()
+            source_conversation_id = sources[0]["conversation_id"]
+            self._conn.execute(
+                "INSERT INTO knowledge_items(id, type, title, status, project, labels_json, "
+                "source_conversation_id, current_version_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    knowledge_id, kind, title, status, project,
+                    json.dumps(labels, ensure_ascii=False), source_conversation_id,
+                    version_id, now, now,
+                ),
+            )
+            self._record_event("knowledge_item", knowledge_id, "created", {
+                "id": knowledge_id, "type": kind, "title": title, "status": status,
+                "project": project, "labels": labels,
+                "sourceConversationId": source_conversation_id,
+                "currentVersionId": version_id, "createdAt": now, "updatedAt": now,
+            })
+            self._insert_knowledge_version(
+                knowledge_id, body, sources, confidence, extractor, digest, version_id
+            )
+        return self.get_knowledge_item(knowledge_id)
+
+    def add_knowledge_version(self, knowledge_id: str, *, body_markdown: str,
+                              evidence_message_ids: list[str], confidence: str = "",
+                              extractor_version: str = "manual-v1",
+                              input_digest: str = "") -> dict | None:
+        item_id = self._norm_id(knowledge_id)
+        body = str(body_markdown or "").strip()
+        if not body:
+            raise ValueError("knowledge body is required")
+        extractor = str(extractor_version or "manual-v1").strip()[:80]
+        confidence = str(confidence or "").strip().lower()[:32]
+        with self._lock, self._conn:
+            item = self._conn.execute(
+                "SELECT * FROM knowledge_items WHERE id=? AND deleted_at IS NULL",
+                (item_id,),
+            ).fetchone()
+            if item is None:
+                return None
+            sources = self._knowledge_sources(evidence_message_ids)
+            digest = str(input_digest or "").strip() or self._knowledge_digest(
+                body, [row["id"] for row in sources]
+            )
+            existing = self._conn.execute(
+                "SELECT id FROM knowledge_versions WHERE knowledge_id=? "
+                "AND input_digest=? AND extractor_version=?",
+                (item_id, digest, extractor),
+            ).fetchone()
+            if existing:
+                return self.get_knowledge_item(item_id)
+            version_id = self._insert_knowledge_version(
+                item_id, body, sources, confidence, extractor, digest
+            )
+            now = _now()
+            self._conn.execute(
+                "UPDATE knowledge_items SET current_version_id=?, updated_at=? WHERE id=?",
+                (version_id, now, item_id),
+            )
+            self._record_event("knowledge_item", item_id, "updated", {
+                "id": item_id, "currentVersionId": version_id, "updatedAt": now,
+            })
+        return self.get_knowledge_item(item_id)
+
+    def list_knowledge_items(self, *, query: str = "", status: str = "",
+                             knowledge_type: str = "", project: str = "",
+                             conversation_id: str = "") -> list[dict]:
+        sql = (
+            "SELECT k.*, v.body_markdown, v.version_number, v.confidence, "
+            "v.extractor_version, (SELECT COUNT(*) FROM knowledge_evidence e "
+            "WHERE e.version_id=k.current_version_id) AS evidence_count "
+            "FROM knowledge_items k LEFT JOIN knowledge_versions v "
+            "ON v.id=k.current_version_id WHERE k.deleted_at IS NULL"
+        )
+        params: list = []
+        if status:
+            sql += " AND k.status=?"; params.append(status)
+        if knowledge_type:
+            sql += " AND k.type=?"; params.append(knowledge_type)
+        if project:
+            sql += " AND k.project=?"; params.append(project)
+        if conversation_id:
+            sql += (
+                " AND EXISTS (SELECT 1 FROM knowledge_evidence ce "
+                "WHERE ce.knowledge_id=k.id AND ce.conversation_id=?)"
+            )
+            params.append(self._norm_id(conversation_id))
+        if query.strip():
+            sql += " AND (k.title LIKE ? OR v.body_markdown LIKE ?)"
+            value = f"%{query.strip()}%"; params.extend((value, value))
+        sql += " ORDER BY k.updated_at DESC, k.id"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            return [self._knowledge_item_dict(row) for row in rows]
+
+    def get_knowledge_item(self, knowledge_id: str) -> dict | None:
+        try:
+            item_id = self._norm_id(knowledge_id)
+        except ValueError:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT k.*, v.body_markdown, v.version_number, v.confidence, "
+                "v.extractor_version, (SELECT COUNT(*) FROM knowledge_evidence e "
+                "WHERE e.version_id=k.current_version_id) AS evidence_count "
+                "FROM knowledge_items k LEFT JOIN knowledge_versions v "
+                "ON v.id=k.current_version_id WHERE k.id=? AND k.deleted_at IS NULL",
+                (item_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            item = self._knowledge_item_dict(row)
+            version_rows = self._conn.execute(
+                "SELECT v.*, (SELECT COUNT(*) FROM knowledge_evidence e "
+                "WHERE e.version_id=v.id) AS evidence_count FROM knowledge_versions v "
+                "WHERE v.knowledge_id=? ORDER BY v.version_number DESC",
+                (item_id,),
+            ).fetchall()
+            evidence_rows = self._conn.execute(
+                "SELECT e.*, m.role, c.title AS conversation_title, "
+                "t.ordinal AS turn_ordinal FROM knowledge_evidence e "
+                "JOIN messages m ON m.id=e.message_id "
+                "JOIN conversations c ON c.id=e.conversation_id "
+                "LEFT JOIN turns t ON t.id=e.turn_id "
+                "WHERE e.version_id=? ORDER BY e.created_at, e.id",
+                (row["current_version_id"],),
+            ).fetchall()
+            item["versions"] = [self._knowledge_version_dict(value) for value in version_rows]
+            item["evidence"] = [self._knowledge_evidence_dict(value) for value in evidence_rows]
+            return item
+
+    def update_knowledge_item(self, knowledge_id: str, changes: dict) -> dict | None:
+        item_id = self._norm_id(knowledge_id)
+        allowed = {"type", "title", "status", "project", "labels"}
+        if not changes or set(changes) - allowed:
+            raise ValueError("unsupported knowledge item update")
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM knowledge_items WHERE id=? AND deleted_at IS NULL",
+                (item_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            kind, title, status, project, labels = self._normalize_knowledge_fields(
+                changes.get("type", row["type"]), changes.get("title", row["title"]),
+                changes.get("status", row["status"]), changes.get("project", row["project"]),
+                changes.get("labels", json.loads(row["labels_json"] or "[]")),
+            )
+            now = _now()
+            self._conn.execute(
+                "UPDATE knowledge_items SET type=?, title=?, status=?, project=?, "
+                "labels_json=?, updated_at=? WHERE id=?",
+                (
+                    kind, title, status, project, json.dumps(labels, ensure_ascii=False),
+                    now, item_id,
+                ),
+            )
+            self._record_event("knowledge_item", item_id, "updated", {
+                "id": item_id, "type": kind, "title": title, "status": status,
+                "project": project, "labels": labels,
+                "currentVersionId": row["current_version_id"], "updatedAt": now,
+            })
+        return self.get_knowledge_item(item_id)
+
+    def delete_knowledge_item(self, knowledge_id: str) -> bool:
+        try:
+            item_id = self._norm_id(knowledge_id)
+        except ValueError:
+            return False
+        with self._lock, self._conn:
+            if not self._conn.execute(
+                "SELECT 1 FROM knowledge_items WHERE id=? AND deleted_at IS NULL",
+                (item_id,),
+            ).fetchone():
+                return False
+            now = _now()
+            self._conn.execute(
+                "UPDATE knowledge_items SET deleted_at=?, updated_at=? WHERE id=?",
+                (now, now, item_id),
+            )
+            self._record_event("knowledge_item", item_id, "deleted", {
+                "id": item_id, "deletedAt": now, "updatedAt": now,
+            })
+            return True
+
+    @staticmethod
+    def _knowledge_generation_job_dict(row: sqlite3.Row) -> dict:
+        status = row["status"]
+        phase = row["phase"]
+        processed = row["processed_message_count"]
+        remaining = row["remaining_message_count"]
+        if status == "completed":
+            progress = 100
+        elif phase == "mapping":
+            progress = 90
+        elif phase == "extracting" and processed + remaining:
+            progress = min(80, round(processed * 80 / (processed + remaining)))
+        else:
+            progress = 0
+        result = {
+            "conversationId": row["conversation_id"],
+            "status": status,
+            "phase": phase,
+            "progressPercent": progress,
+            "processedMessageCount": processed,
+            "remainingMessageCount": remaining,
+            "generatedItemCount": row["generated_item_count"],
+            "maxConversations": row["max_conversations"],
+            "resultMapId": row["result_map_id"] or "",
+            "error": row["error"] or "",
+            "startedAt": row["started_at"],
+            "updatedAt": row["updated_at"],
+            "completedAt": row["completed_at"],
+        }
+        if "conversation_title" in row.keys():
+            result["conversationTitle"] = row["conversation_title"] or ""
+        return result
+
+    def get_knowledge_generation_job(self, conversation_id: str) -> dict | None:
+        sid = self._norm_id(conversation_id)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT j.*, c.title AS conversation_title "
+                "FROM knowledge_generation_jobs j "
+                "JOIN conversations c ON c.id=j.conversation_id "
+                "WHERE j.conversation_id=?",
+                (sid,),
+            ).fetchone()
+        return self._knowledge_generation_job_dict(row) if row else None
+
+    def list_knowledge_generation_jobs(self, *, limit: int = 20) -> list[dict]:
+        safe_limit = max(1, min(int(limit), 100))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT j.*, c.title AS conversation_title "
+                "FROM knowledge_generation_jobs j "
+                "JOIN conversations c ON c.id=j.conversation_id "
+                "ORDER BY CASE WHEN j.status IN ('queued', 'running') THEN 0 ELSE 1 END, "
+                "j.updated_at DESC LIMIT ?",
+                (safe_limit,),
+            ).fetchall()
+        return [self._knowledge_generation_job_dict(row) for row in rows]
+
+    def begin_knowledge_generation_job(
+        self, conversation_id: str, *, max_conversations: int = 48,
+    ) -> tuple[dict, bool]:
+        sid = self._norm_id(conversation_id)
+        coverage = max(1, min(int(max_conversations), 200))
+        with self._lock, self._conn:
+            if self.get(sid) is None:
+                raise ValueError(f"unknown conversation: {sid}")
+            row = self._conn.execute(
+                "SELECT status FROM knowledge_generation_jobs WHERE conversation_id=?",
+                (sid,),
+            ).fetchone()
+            if row and row["status"] in {"queued", "running"}:
+                return self.get_knowledge_generation_job(sid), False
+            now = _now()
+            self._conn.execute(
+                "INSERT INTO knowledge_generation_jobs("
+                "conversation_id, status, phase, max_conversations, started_at, updated_at"
+                ") VALUES (?, 'queued', 'queued', ?, ?, ?) "
+                "ON CONFLICT(conversation_id) DO UPDATE SET status='queued', phase='queued', "
+                "processed_message_count=0, remaining_message_count=0, "
+                "generated_item_count=0, max_conversations=excluded.max_conversations, "
+                "result_map_id=NULL, error='', started_at=excluded.started_at, "
+                "updated_at=excluded.updated_at, completed_at=NULL",
+                (sid, coverage, now, now),
+            )
+        return self.get_knowledge_generation_job(sid), True
+
+    def update_knowledge_generation_job(
+        self, conversation_id: str, *, status: str, phase: str,
+        processed_message_count: int | None = None,
+        remaining_message_count: int | None = None,
+        generated_item_count: int | None = None,
+        result_map_id: str | None = None, error: str = "",
+    ) -> dict:
+        sid = self._norm_id(conversation_id)
+        if status not in self.KNOWLEDGE_GENERATION_STATUSES:
+            raise ValueError("invalid knowledge generation status")
+        if phase not in self.KNOWLEDGE_GENERATION_PHASES:
+            raise ValueError("invalid knowledge generation phase")
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM knowledge_generation_jobs WHERE conversation_id=?",
+                (sid,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown knowledge generation job: {sid}")
+            processed = row["processed_message_count"] if processed_message_count is None \
+                else max(0, int(processed_message_count))
+            remaining = row["remaining_message_count"] if remaining_message_count is None \
+                else max(0, int(remaining_message_count))
+            generated = row["generated_item_count"] if generated_item_count is None \
+                else max(0, int(generated_item_count))
+            map_id = row["result_map_id"] if result_map_id is None else result_map_id
+            now = _now()
+            completed_at = now if status in {"completed", "failed"} else None
+            self._conn.execute(
+                "UPDATE knowledge_generation_jobs SET status=?, phase=?, "
+                "processed_message_count=?, remaining_message_count=?, "
+                "generated_item_count=?, result_map_id=?, error=?, updated_at=?, "
+                "completed_at=? WHERE conversation_id=?",
+                (
+                    status, phase, processed, remaining, generated, map_id,
+                    str(error or "")[:2000], now, completed_at, sid,
+                ),
+            )
+        return self.get_knowledge_generation_job(sid)
+
+    def prepare_knowledge_extraction(self, conversation_id: str, extractor_version: str,
+                                     *, max_chars: int = 45000,
+                                     max_messages: int = 120) -> dict:
+        sid = self._norm_id(conversation_id)
+        version = str(extractor_version or "").strip()
+        if not version:
+            raise ValueError("extractor version is required")
+        max_chars = max(1000, min(int(max_chars), 200000))
+        max_messages = max(1, min(int(max_messages), 500))
+        with self._lock:
+            if self.get(sid) is None:
+                raise ValueError(f"unknown conversation: {sid}")
+            branch_id = self._main_branch_id(sid)
+            rows = self._conn.execute(
+                "SELECT id, role, text, turn_id, ordinal, ts FROM messages "
+                "WHERE branch_id=? AND role IN ('user', 'assistant') ORDER BY ordinal",
+                (branch_id,),
+            ).fetchall()
+            run_rows = self._conn.execute(
+                "SELECT source_message_ids_json, result_item_ids_json FROM "
+                "knowledge_extraction_runs WHERE conversation_id=? AND extractor_version=? "
+                "ORDER BY created_at, id",
+                (sid, version),
+            ).fetchall()
+            processed = set()
+            latest_result_ids = []
+            for run in run_rows:
+                try:
+                    processed.update(json.loads(run["source_message_ids_json"] or "[]"))
+                    latest_result_ids = json.loads(run["result_item_ids_json"] or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            pending = [row for row in rows if row["id"] not in processed and row["text"].strip()]
+            batch = []
+            used_chars = 0
+            for row in pending:
+                if len(batch) >= max_messages:
+                    break
+                remaining = max_chars - used_chars
+                if remaining <= 0:
+                    break
+                text = row["text"]
+                if len(text) > remaining:
+                    if batch:
+                        break
+                    text = text[:remaining]
+                batch.append({
+                    "id": row["id"], "role": row["role"], "text": text,
+                    "turnId": row["turn_id"], "ordinal": row["ordinal"], "ts": row["ts"],
+                })
+                used_chars += len(text)
+            if not batch:
+                items = [self.get_knowledge_item(item_id) for item_id in latest_result_ids]
+                return {
+                    "conversationId": sid, "extractorVersion": version,
+                    "messages": [], "sourceMessageIds": [], "inputDigest": "",
+                    "existingItems": self.list_knowledge_items(),
+                    "remainingMessageCount": 0, "processedMessageCount": len(processed),
+                    "cached": True, "noNewMessages": True,
+                    "cachedItems": [item for item in items if item is not None],
+                }
+            digest_source = json.dumps(
+                [{"id": item["id"], "role": item["role"], "text": item["text"]}
+                 for item in batch],
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )
+            digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
+            cached = self._conn.execute(
+                "SELECT result_item_ids_json FROM knowledge_extraction_runs "
+                "WHERE conversation_id=? AND extractor_version=? AND input_digest=?",
+                (sid, version, digest),
+            ).fetchone()
+            cached_items = []
+            if cached:
+                try:
+                    cached_items = [
+                        self.get_knowledge_item(item_id)
+                        for item_id in json.loads(cached["result_item_ids_json"] or "[]")
+                    ]
+                except (json.JSONDecodeError, TypeError):
+                    cached_items = []
+            return {
+                "conversationId": sid, "extractorVersion": version,
+                "messages": batch, "sourceMessageIds": [item["id"] for item in batch],
+                "inputDigest": digest,
+                "existingItems": self.list_knowledge_items(),
+                "remainingMessageCount": max(0, len(pending) - len(batch)),
+                "processedMessageCount": len(processed), "cached": bool(cached),
+                "noNewMessages": False,
+                "cachedItems": [item for item in cached_items if item is not None],
+            }
+
+    def apply_knowledge_extraction(self, conversation_id: str, extractor_version: str,
+                                   input_digest: str, source_message_ids: list[str],
+                                   candidates: list[dict]) -> dict:
+        sid = self._norm_id(conversation_id)
+        version = str(extractor_version or "").strip()
+        digest = str(input_digest or "").strip()
+        source_ids = list(dict.fromkeys(str(value or "").strip()
+                                        for value in source_message_ids or []))
+        if not version or not digest or not source_ids:
+            raise ValueError("extraction run metadata is incomplete")
+        with self._lock, self._conn:
+            cached = self._conn.execute(
+                "SELECT result_item_ids_json FROM knowledge_extraction_runs "
+                "WHERE conversation_id=? AND extractor_version=? AND input_digest=?",
+                (sid, version, digest),
+            ).fetchone()
+            if cached:
+                result_ids = json.loads(cached["result_item_ids_json"] or "[]")
+                items = [self.get_knowledge_item(item_id) for item_id in result_ids]
+                return {"cached": True, "items": [item for item in items if item]}
+
+            source_rows = self._knowledge_sources(source_ids)
+            if any(row["conversation_id"] != sid for row in source_rows):
+                raise ValueError("extraction evidence must belong to the source conversation")
+            allowed_sources = {row["id"]: row for row in source_rows}
+            existing_rows = self._conn.execute(
+                "SELECT * FROM knowledge_items WHERE deleted_at IS NULL"
+            ).fetchall()
+            existing = {
+                (row["type"], _norm_text(row["title"]).casefold()): row
+                for row in existing_rows
+            }
+            result_ids = []
+            for candidate in candidates:
+                kind, title, _, project, labels = self._normalize_knowledge_fields(
+                    candidate.get("type"), candidate.get("title"), "draft",
+                    candidate.get("project") or "", candidate.get("labels") or [],
+                )
+                body = str(candidate.get("bodyMarkdown") or "").strip()
+                if not body:
+                    raise ValueError("extracted knowledge body is required")
+                evidence_ids = list(dict.fromkeys(candidate.get("evidenceMessageIds") or []))
+                if not evidence_ids or any(value not in allowed_sources for value in evidence_ids):
+                    raise ValueError("extracted knowledge references out-of-scope evidence")
+                evidence_rows = [allowed_sources[value] for value in evidence_ids]
+                confidence = str(candidate.get("confidence") or "").strip().lower()[:32]
+                item_key = (kind, _norm_text(title).casefold())
+                row = existing.get(item_key)
+                version_digest = self._knowledge_digest(body, evidence_ids)
+                if row is None:
+                    item_id = str(uuid.uuid4())
+                    version_id = str(uuid.uuid4())
+                    now = _now()
+                    self._conn.execute(
+                        "INSERT INTO knowledge_items(id, type, title, status, project, "
+                        "labels_json, source_conversation_id, current_version_id, "
+                        "created_at, updated_at) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)",
+                        (
+                            item_id, kind, title, project,
+                            json.dumps(labels, ensure_ascii=False), sid, version_id, now, now,
+                        ),
+                    )
+                    self._record_event("knowledge_item", item_id, "created", {
+                        "id": item_id, "type": kind, "title": title, "status": "draft",
+                        "project": project, "labels": labels,
+                        "sourceConversationId": sid, "currentVersionId": version_id,
+                        "createdAt": now, "updatedAt": now,
+                    })
+                    self._insert_knowledge_version(
+                        item_id, body, evidence_rows, confidence, version,
+                        version_digest, version_id,
+                    )
+                    row = self._conn.execute(
+                        "SELECT * FROM knowledge_items WHERE id=?", (item_id,)
+                    ).fetchone()
+                    existing[item_key] = row
+                else:
+                    item_id = row["id"]
+                    prior = self._conn.execute(
+                        "SELECT id FROM knowledge_versions WHERE knowledge_id=? "
+                        "AND input_digest=? AND extractor_version=?",
+                        (item_id, version_digest, version),
+                    ).fetchone()
+                    if not prior:
+                        version_id = self._insert_knowledge_version(
+                            item_id, body, evidence_rows, confidence, version, version_digest
+                        )
+                        now = _now()
+                        self._conn.execute(
+                            "UPDATE knowledge_items SET current_version_id=?, title=?, "
+                            "project=?, labels_json=?, updated_at=? WHERE id=?",
+                            (
+                                version_id, title, project,
+                                json.dumps(labels, ensure_ascii=False), now, item_id,
+                            ),
+                        )
+                        self._record_event("knowledge_item", item_id, "updated", {
+                            "id": item_id, "type": kind, "title": title,
+                            "status": row["status"], "project": project, "labels": labels,
+                            "currentVersionId": version_id, "updatedAt": now,
+                        })
+                result_ids.append(item_id)
+
+            run_id = str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"copilotbridge:knowledge-run:{sid}:{version}:{digest}",
+            ))
+            self._conn.execute(
+                "INSERT INTO knowledge_extraction_runs(id, conversation_id, "
+                "extractor_version, input_digest, source_message_ids_json, "
+                "result_item_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id, sid, version, digest,
+                    json.dumps(source_ids, ensure_ascii=False),
+                    json.dumps(result_ids, ensure_ascii=False), _now(),
+                ),
+            )
+        items = [self.get_knowledge_item(item_id) for item_id in result_ids]
+        return {"cached": False, "items": [item for item in items if item]}
+
+    @staticmethod
+    def _balanced_history_sessions(sessions: list[dict], limit: int) -> list[dict]:
+        noise_prefixes = (
+            "you are a tool-free personal knowledge extraction engine",
+            "you are a tool-free knowledge architect",
+            "reply with exactly:", "security probe:", "[terminal ",
+        )
+        eligible = [
+            item for item in sessions
+            if not str(item.get("title") or "").strip().lower().startswith(noise_prefixes)
+            and (
+                int(item.get("promptCount") or 0) >= 3
+                or item.get("isPinned") or item.get("isFavorite")
+                or item.get("project") or item.get("labels")
+            )
+            and int(item.get("messageCount") or 0) > 0
+        ]
+        if len(eligible) <= limit:
+            return eligible
+        priority = [
+            item for item in eligible
+            if item.get("isPinned") or item.get("isFavorite")
+        ][:limit]
+        chosen_ids = {item["id"] for item in priority}
+        regular = [item for item in eligible if item["id"] not in chosen_ids]
+        remaining = limit - len(priority)
+        recent_count = min(len(regular), (remaining + 1) // 2)
+        selected = priority + regular[:recent_count]
+        chosen_ids.update(item["id"] for item in selected)
+        older = [item for item in regular[recent_count:] if item["id"] not in chosen_ids]
+        older_slots = limit - len(selected)
+        if older_slots > 0 and older:
+            for index in range(older_slots):
+                position = min(int(index * len(older) / older_slots), len(older) - 1)
+                item = older[position]
+                if item["id"] not in chosen_ids:
+                    selected.append(item)
+                    chosen_ids.add(item["id"])
+        return selected[:limit]
+
+    def prepare_knowledge_map(self, extractor_version: str, *,
+                              max_chars: int = 22000,
+                              max_conversations: int = 48,
+                              focus_conversation_id: str = "") -> dict:
+        version = str(extractor_version or "").strip()
+        if not version:
+            raise ValueError("extractor version is required")
+        focus_id = (
+            self._norm_id(focus_conversation_id)
+            if str(focus_conversation_id or "").strip() else ""
+        )
+        max_chars = max(4000, min(int(max_chars), 120000))
+        max_conversations = max(4, min(int(max_conversations), 200))
+        with self._lock:
+            all_sessions = self.list()
+            focus_session = next(
+                (item for item in all_sessions if item["id"] == focus_id), None
+            ) if focus_id else None
+            if focus_id and focus_session is None:
+                raise ValueError(f"unknown conversation: {focus_id}")
+            eligible_sessions = self._balanced_history_sessions(
+                all_sessions, len(all_sessions) or 1
+            )
+            eligible_ids = {item["id"] for item in eligible_sessions}
+            if focus_session:
+                eligible_ids.add(focus_id)
+            eligible_count = len(eligible_ids)
+            selected = self._balanced_history_sessions(
+                all_sessions, max_conversations
+            )
+            if focus_session:
+                selected = [focus_session] + [
+                    item for item in selected if item["id"] != focus_id
+                ][:max_conversations - 1]
+            conversations = []
+            source_ids = []
+            used_chars = 2
+            for session in selected:
+                focused = session["id"] == focus_id
+                branch_id = self._main_branch_id(session["id"])
+                rows = self._conn.execute(
+                    "SELECT id, role, text, turn_id, ordinal, ts FROM messages "
+                    "WHERE branch_id=? AND role IN ('user', 'assistant') "
+                    "AND trim(text)<>'' ORDER BY ordinal",
+                    (branch_id,),
+                ).fetchall()
+                if not rows:
+                    if focused:
+                        raise ValueError(
+                            "focused conversation has no eligible messages"
+                        )
+                    continue
+                if focused:
+                    limit = min(40, len(rows))
+                    positions = {
+                        round(index * (len(rows) - 1) / max(1, limit - 1))
+                        for index in range(limit)
+                    }
+                    candidates = [rows[position] for position in sorted(positions)]
+                else:
+                    user_rows = [row for row in rows if row["role"] == "user"]
+                    assistant_rows = [row for row in rows if row["role"] == "assistant"]
+                    candidates = []
+                    if user_rows:
+                        candidates.append(user_rows[0])
+                        if user_rows[-1]["id"] != user_rows[0]["id"]:
+                            candidates.append(user_rows[-1])
+                    if assistant_rows:
+                        candidates.append(assistant_rows[-1])
+                    if not candidates:
+                        candidates.append(rows[-1])
+                candidates.sort(key=lambda row: row["ordinal"])
+                messages = [{
+                    "messageId": row["id"],
+                    "role": row["role"],
+                    "text": self._preview(row["text"], 360 if focused else 220),
+                    "turnId": row["turn_id"],
+                } for row in candidates]
+                entry = {
+                    "conversationId": session["id"],
+                    "focus": focused,
+                    "title": self._preview(str(
+                        session.get("title") or "未命名会话"
+                    ), 180),
+                    "project": self._preview(str(
+                        session.get("project") or ""
+                    ), 120),
+                    "labels": [
+                        self._preview(str(label), 80)
+                        for label in (session.get("labels") or [])[:8]
+                    ],
+                    "updatedAt": session.get("updatedAt"),
+                    "messages": messages,
+                }
+                encoded = json.dumps(
+                    entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                separator_chars = 1 if conversations else 0
+                remaining_chars = max_chars - used_chars - separator_chars
+                if len(encoded) > remaining_chars and conversations:
+                    continue
+                if len(encoded) > remaining_chars:
+                    for message in messages:
+                        message["text"] = self._preview(message["text"], 120)
+                    encoded = json.dumps(
+                        entry, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    while len(encoded) > remaining_chars and len(messages) > 1:
+                        limit = max(1, len(messages) // 2)
+                        positions = {
+                            round(index * (len(messages) - 1) / max(1, limit - 1))
+                            for index in range(limit)
+                        }
+                        messages[:] = [
+                            messages[position] for position in sorted(positions)
+                        ]
+                        encoded = json.dumps(
+                            entry, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                if len(encoded) > remaining_chars:
+                    if focused:
+                        raise ValueError(
+                            "focused conversation exceeds the map input limit"
+                        )
+                    continue
+                conversations.append(entry)
+                source_ids.extend(message["messageId"] for message in messages)
+                used_chars += separator_chars + len(encoded)
+            digest_source = json.dumps(
+                conversations, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            )
+            digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
+            map_id = f"conversation-{focus_id}" if focus_id else "history"
+            cached = self.get_knowledge_map(map_id)
+            return {
+                "conversations": conversations,
+                "sourceMessageIds": list(dict.fromkeys(source_ids)),
+                "inputDigest": digest,
+                "extractorVersion": version,
+                "mapId": map_id,
+                "eligibleConversationCount": eligible_count,
+                "selectedConversationCount": len(conversations),
+                "cached": bool(
+                    cached
+                    and cached.get("inputDigest") == digest
+                    and cached.get("extractorVersion") == version
+                ),
+                "cachedMap": cached,
+            }
+
+    def get_knowledge_map(self, map_id: str = "history") -> dict | None:
+        map_id = self._norm_id(map_id)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM knowledge_maps WHERE id=?", (map_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                payload = json.loads(row["map_json"])
+            except (json.JSONDecodeError, TypeError):
+                return None
+            evidence_ids = []
+            for node in payload.get("nodes") or []:
+                evidence_ids.extend(node.get("evidenceMessageIds") or [])
+            evidence_by_id = {}
+            if evidence_ids:
+                unique_ids = list(dict.fromkeys(evidence_ids))
+                placeholders = ",".join("?" for _ in unique_ids)
+                sources = self._conn.execute(
+                    "SELECT m.*, c.title AS conversation_title, "
+                    "t.ordinal AS turn_ordinal "
+                    "FROM messages m JOIN conversations c "
+                    "ON c.id=m.conversation_id "
+                    "LEFT JOIN turns t ON t.id=m.turn_id "
+                    f"WHERE m.id IN ({placeholders})",
+                    unique_ids,
+                ).fetchall()
+                for source in sources:
+                    evidence_by_id[source["id"]] = {
+                        "messageId": source["id"],
+                        "conversationId": source["conversation_id"],
+                        "conversationTitle": source["conversation_title"],
+                        "turnId": source["turn_id"],
+                        "turnOrdinal": source["turn_ordinal"],
+                        "role": source["role"],
+                        "snippet": self._preview(source["text"], 240),
+                    }
+            nodes = []
+            for node in payload.get("nodes") or []:
+                hydrated = dict(node)
+                node_evidence_ids = list(dict.fromkeys(
+                    node.get("evidenceMessageIds") or []
+                ))
+                hydrated["evidence"] = [
+                    evidence_by_id[message_id]
+                    for message_id in node_evidence_ids
+                    if message_id in evidence_by_id
+                ]
+                hydrated["missingEvidenceCount"] = sum(
+                    message_id not in evidence_by_id
+                    for message_id in node_evidence_ids
+                )
+                nodes.append(hydrated)
+            return {
+                "id": row["id"],
+                "title": row["title"],
+                "summary": row["summary"],
+                "nodes": nodes,
+                "inputDigest": row["input_digest"],
+                "extractorVersion": row["extractor_version"],
+                "sourceConversationCount": row["source_conversation_count"],
+                "sourceMessageCount": row["source_message_count"],
+                "createdAt": row["created_at"],
+                "updatedAt": row["updated_at"],
+            }
+
+    def save_knowledge_map(self, payload: dict, *, input_digest: str,
+                           extractor_version: str,
+                           source_message_ids: list[str],
+                           source_conversation_count: int,
+                           map_id: str = "history") -> dict:
+        map_id = self._norm_id(map_id)
+        digest = str(input_digest or "").strip()
+        version = str(extractor_version or "").strip()
+        if not digest or not version:
+            raise ValueError("knowledge map metadata is incomplete")
+        source_ids = list(dict.fromkeys(
+            str(value or "").strip() for value in source_message_ids or []
+        ))
+        source_ids = [value for value in source_ids if value]
+        if source_ids:
+            self._knowledge_sources(source_ids)
+        now = _now()
+        existing = self.get_knowledge_map(map_id)
+        created_at = existing["createdAt"] if existing else now
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO knowledge_maps(id, title, summary, map_json, "
+                "input_digest, extractor_version, source_message_ids_json, "
+                "source_conversation_count, source_message_count, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET title=excluded.title, "
+                "summary=excluded.summary, map_json=excluded.map_json, "
+                "input_digest=excluded.input_digest, "
+                "extractor_version=excluded.extractor_version, "
+                "source_message_ids_json=excluded.source_message_ids_json, "
+                "source_conversation_count=excluded.source_conversation_count, "
+                "source_message_count=excluded.source_message_count, "
+                "updated_at=excluded.updated_at",
+                (
+                    map_id, str(payload.get("title") or "知识全景").strip(),
+                    str(payload.get("summary") or "").strip(),
+                    json.dumps(payload, ensure_ascii=False), digest, version,
+                    json.dumps(source_ids, ensure_ascii=False),
+                    max(0, int(source_conversation_count)), len(source_ids),
+                    created_at, now,
+                ),
+            )
+        return self.get_knowledge_map(map_id)
 
     # -- sync outbox -----------------------------------------------------
 
@@ -1413,6 +2759,23 @@ class SessionStore:
             )
             return
 
+        if entity_type == "conversation" and operation == "organized":
+            sid = self._norm_id(payload.get("id"))
+            updated = float(payload.get("updatedAt") or event_time)
+            labels = self._normalize_labels(payload.get("labels") or [])
+            project = " ".join(str(payload.get("project") or "").split())[:80]
+            self._conn.execute(
+                "UPDATE conversations SET is_favorite=?, is_pinned=?, project=?, "
+                "labels_json=?, organization_updated_at=? "
+                "WHERE id=? AND organization_updated_at<=?",
+                (
+                    int(bool(payload.get("isFavorite"))),
+                    int(bool(payload.get("isPinned"))), project,
+                    json.dumps(labels, ensure_ascii=False), updated, sid, updated,
+                ),
+            )
+            return
+
         if entity_type == "conversation" and operation == "deleted":
             sid = self._norm_id(payload.get("id"))
             deleted = float(payload.get("deletedAt") or event_time)
@@ -1498,6 +2861,188 @@ class SessionStore:
                     "updated_at=excluded.updated_at",
                     (key, json.dumps(payload.get("value")), updated),
                 )
+            return
+
+        if entity_type == "knowledge_item" and operation == "created":
+            item_id = self._norm_id(payload.get("id"))
+            source_conversation_id = payload.get("sourceConversationId") or None
+            if source_conversation_id:
+                source_conversation_id = self._norm_id(source_conversation_id)
+                if not self._conn.execute(
+                    "SELECT 1 FROM conversations WHERE id=?", (source_conversation_id,)
+                ).fetchone():
+                    raise SyncDependencyError(
+                        f"knowledge item references unknown conversation: {source_conversation_id}"
+                    )
+            kind, title, status, project, labels = self._normalize_knowledge_fields(
+                payload.get("type"), payload.get("title"), payload.get("status") or "draft",
+                payload.get("project") or "", payload.get("labels") or [],
+            )
+            created = float(payload.get("createdAt") or event_time)
+            updated = float(payload.get("updatedAt") or created)
+            self._conn.execute(
+                "INSERT INTO knowledge_items(id, type, title, status, project, labels_json, "
+                "source_conversation_id, current_version_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET type=excluded.type, title=excluded.title, "
+                "status=excluded.status, project=excluded.project, "
+                "labels_json=excluded.labels_json, "
+                "source_conversation_id=excluded.source_conversation_id, "
+                "current_version_id=excluded.current_version_id, updated_at=excluded.updated_at "
+                "WHERE knowledge_items.updated_at<=excluded.updated_at",
+                (
+                    item_id, kind, title, status, project,
+                    json.dumps(labels, ensure_ascii=False), source_conversation_id,
+                    payload.get("currentVersionId"), created, updated,
+                ),
+            )
+            return
+
+        if entity_type == "knowledge_item" and operation == "updated":
+            item_id = self._norm_id(payload.get("id"))
+            row = self._conn.execute(
+                "SELECT * FROM knowledge_items WHERE id=?", (item_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"knowledge update references unknown item: {item_id}")
+            updated = float(payload.get("updatedAt") or event_time)
+            if float(row["updated_at"]) > updated:
+                return
+            incoming_version_id = (
+                str(payload.get("currentVersionId") or "").strip()
+                or row["current_version_id"]
+            )
+            if (
+                float(row["updated_at"]) == updated
+                and row["current_version_id"]
+                and incoming_version_id
+                and incoming_version_id < row["current_version_id"]
+            ):
+                return
+            kind, title, status, project, labels = self._normalize_knowledge_fields(
+                payload.get("type", row["type"]), payload.get("title", row["title"]),
+                payload.get("status", row["status"]), payload.get("project", row["project"]),
+                payload.get("labels", json.loads(row["labels_json"] or "[]")),
+            )
+            self._conn.execute(
+                "UPDATE knowledge_items SET type=?, title=?, status=?, project=?, "
+                "labels_json=?, current_version_id=?, updated_at=? WHERE id=?",
+                (
+                    kind, title, status, project, json.dumps(labels, ensure_ascii=False),
+                    incoming_version_id,
+                    updated, item_id,
+                ),
+            )
+            return
+
+        if entity_type == "knowledge_item" and operation == "deleted":
+            item_id = self._norm_id(payload.get("id"))
+            deleted = float(payload.get("deletedAt") or event_time)
+            self._conn.execute(
+                "UPDATE knowledge_items SET deleted_at=?, updated_at=? "
+                "WHERE id=? AND (deleted_at IS NULL OR deleted_at<=?)",
+                (deleted, deleted, item_id, deleted),
+            )
+            return
+
+        if entity_type == "knowledge_version" and operation == "created":
+            version_id = self._norm_id(payload.get("id"))
+            item_id = self._norm_id(payload.get("knowledgeId"))
+            if not self._conn.execute(
+                "SELECT 1 FROM knowledge_items WHERE id=?", (item_id,)
+            ).fetchone():
+                raise SyncDependencyError(
+                    f"knowledge version references unknown item: {item_id}"
+                )
+            if self._conn.execute(
+                "SELECT 1 FROM knowledge_versions WHERE id=?", (version_id,)
+            ).fetchone():
+                return
+            digest = str(payload.get("inputDigest") or "")
+            extractor = str(payload.get("extractorVersion") or "manual-v1")
+            semantic_match = self._conn.execute(
+                "SELECT id FROM knowledge_versions WHERE knowledge_id=? "
+                "AND input_digest=? AND extractor_version=?",
+                (item_id, digest, extractor),
+            ).fetchone()
+            if semantic_match and semantic_match["id"] != version_id:
+                larger_id = max(semantic_match["id"], version_id)
+                conflict_digest = f"{digest}:concurrent:{larger_id}"
+                if larger_id == semantic_match["id"]:
+                    self._conn.execute(
+                        "UPDATE knowledge_versions SET input_digest=? WHERE id=?",
+                        (conflict_digest, semantic_match["id"]),
+                    )
+                else:
+                    digest = conflict_digest
+            next_number = self._conn.execute(
+                "SELECT COALESCE(MAX(version_number), 0) + 1 AS value "
+                "FROM knowledge_versions WHERE knowledge_id=?",
+                (item_id,),
+            ).fetchone()["value"]
+            self._conn.execute(
+                "INSERT INTO knowledge_versions(id, knowledge_id, version_number, "
+                "body_markdown, input_digest, extractor_version, confidence, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    version_id, item_id, next_number,
+                    str(payload.get("bodyMarkdown") or ""),
+                    digest, extractor,
+                    str(payload.get("confidence") or ""),
+                    float(payload.get("createdAt") or event_time),
+                ),
+            )
+            self._renumber_knowledge_versions(item_id)
+            return
+
+        if entity_type == "knowledge_evidence" and operation == "created":
+            evidence_id = self._norm_id(payload.get("id"))
+            item_id = self._norm_id(payload.get("knowledgeId"))
+            version_id = self._norm_id(payload.get("versionId"))
+            conversation_id = self._norm_id(payload.get("conversationId"))
+            branch_id = self._norm_id(payload.get("branchId"))
+            turn_id = str(payload.get("turnId") or "").strip() or None
+            message_id = self._norm_id(payload.get("messageId"))
+            if not self._conn.execute(
+                "SELECT 1 FROM knowledge_items WHERE id=?", (item_id,)
+            ).fetchone():
+                raise SyncDependencyError(
+                    f"knowledge evidence references unknown item: {item_id}"
+                )
+            version = self._conn.execute(
+                "SELECT knowledge_id FROM knowledge_versions WHERE id=?", (version_id,)
+            ).fetchone()
+            if version is None:
+                raise SyncDependencyError(
+                    f"knowledge evidence references unknown version: {version_id}"
+                )
+            if version["knowledge_id"] != item_id:
+                raise ValueError("knowledge evidence version does not belong to item")
+            source = self._conn.execute(
+                "SELECT conversation_id, branch_id, turn_id FROM messages WHERE id=?",
+                (message_id,),
+            ).fetchone()
+            if source is None:
+                raise SyncDependencyError(
+                    f"knowledge evidence references unknown message: {message_id}"
+                )
+            if (
+                source["conversation_id"] != conversation_id
+                or source["branch_id"] != branch_id
+                or source["turn_id"] != turn_id
+            ):
+                raise ValueError("knowledge evidence source provenance is inconsistent")
+            self._conn.execute(
+                "INSERT OR IGNORE INTO knowledge_evidence(id, knowledge_id, version_id, "
+                "conversation_id, branch_id, turn_id, message_id, snippet, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    evidence_id, item_id, version_id, conversation_id,
+                    branch_id, turn_id, message_id,
+                    str(payload.get("snippet") or ""),
+                    float(payload.get("createdAt") or event_time),
+                ),
+            )
             return
 
         if entity_type == "external_ref" and operation == "created":

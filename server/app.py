@@ -30,6 +30,7 @@ from botbuilder.integration.aiohttp import (
 from bot import CopilotBridgeBot
 from config import DefaultConfig
 from providers import available_providers, build_provider
+from knowledge_extractor import build_knowledge_extractor
 from webchat import setup_web_routes
 
 logging.basicConfig(
@@ -62,6 +63,7 @@ ADAPTER.on_turn_error = on_error
 
 # The active AI backend (Copilot CLI by default; selectable via AI_PROVIDER).
 RUNNER = build_provider(CONFIG)
+KNOWLEDGE_EXTRACTOR = build_knowledge_extractor(CONFIG)
 BOT = CopilotBridgeBot(ADAPTER, CONFIG, RUNNER)
 
 
@@ -95,6 +97,7 @@ async def health(req: Request) -> Response:  # noqa: ARG001
             "copilot": RUNNER.exe,
             "provider": getattr(RUNNER, "name", "copilot"),
             "providerAvailable": getattr(RUNNER, "available", True),
+            "knowledgeExtraction": KNOWLEDGE_EXTRACTOR.describe(),
             "scope": CONFIG.COPILOT_SCOPE,
             "workdir": RUNNER.workdir,
             "authMode": auth_mode,
@@ -117,7 +120,7 @@ APP.router.add_get("/health", health)
 APP.router.add_get("/api/providers", providers)
 
 # Direct mobile/web chat API + the mobile web app (served at /).
-setup_web_routes(APP, CONFIG, RUNNER)
+setup_web_routes(APP, CONFIG, RUNNER, knowledge_extractor=KNOWLEDGE_EXTRACTOR)
 
 # Localhost control plane (status / shutdown / tunnel) used by the Control Panel.
 from control import setup_control_routes  # noqa: E402

@@ -43,6 +43,59 @@ Other niceties: persistent sessions that survive restarts, image attachments
 so multiple devices don't collide. Machine-aware History can hide conversations
 with no more than two user prompts by default, without deleting their data.
 
+Version 2.3 adds a responsive AI work center around that foundation:
+
+- **Unified Inbox** with a real detail view, complete, remind-later, bulk-complete,
+  and open/import actions.
+- **Session Manager** with synchronized favorites, pins, projects, labels, device
+  groups, recent/waiting filters, and the configurable short-session filter.
+- **Conversation** and **Settings** views that retain the existing chat composer,
+  prompt timeline, authentication, notifications, History import, and OneDrive sync.
+- Desktop navigation becomes a compact left rail; narrow screens use bottom
+  navigation and full-width detail views without clipped controls.
+
+Version 2.4 adds the evidence-backed foundation for a personal knowledge base:
+
+- **Knowledge Hub** with structured types, draft/verified/conflicted/superseded
+  states, project and label metadata, Markdown detail, and responsive mobile views.
+- **Versioned knowledge** keeps immutable historical versions while the item points
+  to its current version; identical extraction inputs are idempotent.
+- **Message-level evidence** is mandatory for every version. Evidence links carry
+  stable conversation, Turn, and message ids and return to the exact highlighted
+  source message.
+- Knowledge items, versions, evidence, status changes, and tombstones use the same
+  transactional Outbox and immutable OneDrive package synchronization as sessions.
+
+Version 2.5 adds safe, incremental knowledge extraction:
+
+- **AI extraction on demand** processes only stable messages not previously handled
+  by the same extractor version; empty results also advance the local watermark.
+- **Tool-free isolation** uses a dedicated provider instead of the normal chat runner.
+  Copilot CLI receives an empty available-tools list; OpenAI uses strict JSON Schema.
+- **Atomic validation** rejects malformed output, unknown fields, duplicate keys, and
+  evidence outside the current batch before any knowledge or ledger row is written.
+- Existing type/title matches receive a new immutable version; new findings start as
+  drafts. Knowledge can be inserted into the current composer only by an explicit user
+  action, with bounded context and no automatic send.
+
+Version 2.6 adds a cross-conversation history mind map:
+
+- **One map across history** synthesizes themes, projects, goals, decisions, practices,
+  problems, solutions, failures, open questions, and todos from balanced conversation
+  samples instead of producing one isolated summary per session.
+- **Evidence-bound nodes** may cite only persisted messages included in the bounded
+  extraction input. Every source opens the exact conversation, Turn, and message.
+- **Strict, tool-free generation** validates the complete JSON result and retries one
+  malformed or out-of-scope response once. A failed refresh never replaces a valid map.
+- **Map-first Knowledge Hub** supports search, branch folding, scope presets, desktop
+  zoom, a mobile scrollable canvas, and explicit composer reuse without automatic send.
+- **Generate from a conversation** uses the book-and-sparkle action in the current
+  conversation header or History row. It incrementally extracts only new messages,
+  appends versions to matching knowledge, and rebuilds the global map with that
+  conversation as the primary branch. Generated items remain searchable in Knowledge Hub.
+- The schema v5 `knowledge_maps` cache is local and rebuildable. Its input digest and
+  extractor version invalidate stale results whenever history or extraction logic changes.
+
 ---
 
 ## Prerequisites (host PC)
@@ -103,6 +156,31 @@ window you can:
 | **OneDrive: Connect / Upload + download / Disconnect** | Run first sync, inspect pending events, or manually synchronize both directions. |
 | **Open AI Dashboard** | Open the browser session dashboard from the native console. |
 
+From 2.6.7, Dashboard counts share a compact title row. The gear button beside
+**AI Dashboard** expands or collapses notification and OneDrive controls, with
+the choice remembered in that browser. Controls start collapsed; when expanded,
+they sit side by side on desktop and stack on phones. The inbox detail pane uses
+the remaining height and about two thirds of the desktop content width.
+
+The conversation knowledge button keeps its progress visible while a generation
+request is pending and prevents duplicate submissions. Late session loading no
+longer replaces a newer navigation choice. Completed tasks open the conversation's
+mind map; failed submissions show an error and allow retry.
+
+From 2.6.6, **Not responding**, **Authentication failed**, and **Status unknown**
+are separate from **Stopped**. Start is disabled while the state is uncertain;
+the start action also refuses to launch another instance when the port is occupied.
+Stop waits for that instance's port to be released, and Restart aborts if stopping
+is not confirmed. Neither action falls back to killing all Bridge processes.
+**Last action** is historical action feedback, not the current server status.
+
+Native session discovery and slow Dev Tunnel CLI calls no longer block the HTTP
+event loop. Slow native scans log only duration and session count. For read-only,
+sanitized diagnostics, run `scripts/collect-diagnostics.ps1 -Port 3978` on the
+affected PC (use its configured port). Its `-SelfTest` mode uses only fixtures.
+This update does not automatically replace an existing Entra/API-key policy;
+use the explicit **Fix local sign-in** confirmation described below.
+
 There's also a **View Connection Info** shortcut that shows the URL + key any
 time without changing anything. The server keeps running in the background and
 restarts at logon, so it's there whenever your devices need it.
@@ -135,6 +213,9 @@ its ingress and control credentials protected:
 - The default AI sandbox is the server's `workspace/` folder
   (`COPILOT_SCOPE=workdir`). Only widen it if you understand the risk.
 - Stop the tunnel from the Control Panel when you don't need remote access.
+- Knowledge extraction and history-map generation run only when requested from
+  Knowledge Hub. They never reuse the tool-enabled chat runner, and every accepted
+  item or node must cite persisted messages from its bounded extraction batch.
 - OneDrive sync requests only `Files.ReadWrite.AppFolder`. Its MSAL token cache
   is encrypted for the current Windows user with DPAPI and never stored in
   SQLite or `.env`. Disconnecting OneDrive keeps local conversations and Outbox.
@@ -145,6 +226,28 @@ its ingress and control credentials protected:
 
 ---
 
+## Localhost unexpectedly asks for Microsoft sign-in
+
+A clean installation uses `AUTH_MODE=tunnel`: localhost needs no browser login,
+and the private Dev Tunnel authenticates remote users with the tunnel owner's
+Microsoft account. This applies to custom ports as well as the default port.
+Dev Tunnel sign-in, optional OneDrive authorization, and application-level Entra
+sign-in are separate policies; completing one does not sign in to the others.
+
+If the **local** page shows Microsoft sign-in and Control Panel reports extra web
+authentication, an Entra/API-key policy is active. In **Control Panel → Connection**,
+select **Fix local sign-in** and confirm to restore the personal-use policy. This
+gracefully restarts only that instance; ongoing AI tasks will be interrupted. It
+preserves the port, control key, account configuration, conversations, knowledge,
+language preference, and OneDrive data. It refuses non-loopback listeners and
+non-private tunnels instead of weakening remote access. Custom authentication is
+never silently migrated; keep it if required by your administrator.
+
+The public diagnostic endpoint `/api/webconfig` reports `authMode` and
+`authRequired` without secrets. Do not share API keys or delete the session database
+to troubleshoot login. Native OneDrive controls use the protected
+`/api/control/sync/*` endpoints, independently of the web login policy.
+
 ## For developers
 
 > The supported way to run CopilotBridge is the **one-click installer** above.
@@ -154,14 +257,22 @@ Build an installer that can be copied to another Windows PC:
 
 ```powershell
 .\scripts\install.ps1
-.\scripts\build-installer.ps1 -Version 2.2.3
+.\scripts\build-installer.ps1 -Version 2.6.7
 ```
 
 The Microsoft edition produces
-`dist\copilotbridgeserver-ms-2.2.3-setup.exe`. It contains the server runtime,
+`dist\copilotbridgeserver-ms-2.6.7-setup.exe`. It contains the server runtime,
 native Control Panel, web Dashboard, Dev Tunnel CLI, SQLite migrations, and
 OneDrive synchronization modules; the target PC does not need Python. The
 desktop shortcut opens the Control Panel after installation.
+
+Run deterministic offline regressions with `scripts/test-offline.ps1`. The live
+`local_test.py` and `local_channel_test.py` scripts are deliberately excluded:
+they call a real model or the running server, and are not offline acceptance tests.
+
+Frontend navigation, generation polling, and disclosure regressions use Node's
+built-in test runner: `node --test server/tests/webui_navigation_test.cjs`.
+They require no npm packages and make no network or model calls.
 
 ### Repository layout
 
@@ -184,6 +295,11 @@ desktop shortcut opens the Control Panel after installation.
 | `POST /api/chat-sync` | `{message, conversationId, ...}` | `{ok, reply, sessionId, title}` (waits) |
 | `GET/POST /api/sessions`, `GET/PATCH/DELETE /api/sessions/{id}` | — | session list / detail CRUD |
 | `GET /api/sessions/{id}/turns` | `?previewLength?` | stable prompt timeline with Turn ids |
+| `GET/POST /api/knowledge`, `GET/PATCH/DELETE /api/knowledge/{id}` | knowledge item + evidence | versioned knowledge CRUD |
+| `POST /api/knowledge/{id}/versions`, `GET /api/sessions/{id}/knowledge` | version + message ids | append version / list by source session |
+| `POST /api/sessions/{id}/knowledge/extract` | — | incrementally extract evidence-backed draft knowledge |
+| `GET /api/knowledge/map` | — | cached history map with hydrated message evidence |
+| `POST /api/knowledge/map/generate` | `{force?, maxConversations?, focusConversationId?}` | validate, cache, and return a global or conversation-focused map |
 | `GET/PATCH /api/settings` | `{promptPreviewLength?}` | user settings |
 | `GET /api/dashboard` | — | active jobs, watched sessions, and attention inbox |
 | `GET/PATCH /api/inbox*`, `POST /api/inbox/scan` | — | inbox list/state and manual native scan |

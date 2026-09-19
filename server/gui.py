@@ -502,18 +502,15 @@ _CREATE_NO_WINDOW = 0x08000000
 
 
 def _port_listening(port, host: str = "127.0.0.1") -> bool:
-    """True if something is accepting TCP connections on ``host:port`` right now.
-
-    Used to confirm the old listen port is fully released after a port change
-    before we restart on the new one.
-    """
+    """Treat an inconclusive TCP probe as occupied; only refusal proves release."""
     import socket
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.5)
-            return s.connect_ex((host, int(port))) == 0
-    except OSError:
+        with socket.create_connection((host, int(port)), timeout=3.0):
+            return True
+    except ConnectionRefusedError:
         return False
+    except OSError:
+        return True
 
 
 def _force_kill_server(tunnel_id: str = "copilot-bridge") -> bool:
@@ -543,6 +540,13 @@ def _force_kill_server(tunnel_id: str = "copilot-bridge") -> bool:
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def _control_panel_key(cfg) -> str:
+    """Pick up a key created by the first server start after this panel opened."""
+    from provisioning import DEFAULT_ENV_PATH, _read_env_token
+
+    return getattr(cfg, "CHAT_API_TOKEN", "") or _read_env_token(DEFAULT_ENV_PATH)
 
 
 def _identity_summary(cfg) -> str:
@@ -1143,7 +1147,7 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     """
     try:
         import tkinter as tk
-        from tkinter import ttk
+        from tkinter import messagebox, ttk
     except Exception:  # noqa: BLE001
         return
 
@@ -1156,7 +1160,6 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     import webbrowser
 
     base = f"http://{getattr(cfg, 'HOST', 'localhost')}:{getattr(cfg, 'PORT', 3978)}"
-    key = getattr(cfg, "CHAT_API_TOKEN", "")
     tunnel_id = getattr(cfg, "TUNNEL_ID", "copilot-bridge")
     tunnel_enabled = bool(getattr(cfg, "TUNNEL_ENABLED", True))
     _host = getattr(cfg, "HOST", "localhost")
@@ -1189,6 +1192,7 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     def http(method, path, body=None, timeout=5):
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(_probe_base() + path, data=data, method=method)
+        key = _control_panel_key(cfg)
         if key:
             req.add_header("X-API-Key", key)
         if data is not None:
@@ -1208,16 +1212,45 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     def fetch_status():
         try:
             s = http("GET", "/api/control/status", timeout=3)
-            s["server"] = "running"
+            if not isinstance(s, dict) or s.get("server") != "running":
+                raise ValueError("Unexpected control status response")
             try:
-                s["sync"] = http("GET", "/api/sync/status", timeout=3)
+                s["webAccess"] = http("GET", "/api/webconfig", timeout=3)
+            except Exception:  # noqa: BLE001
+                s["webAccess"] = {}
+            try:
+                s["sync"] = http("GET", "/api/control/sync/status", timeout=3)
             except Exception as exc:  # noqa: BLE001
                 s["sync"] = {"enabled": False, "error": str(exc)}
             return s
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            error = exc.__cause__ or exc
+            server_state = "unknown"
+            if isinstance(error, urllib.error.HTTPError):
+                if error.code in (401, 403):
+                    server_state = "unauthorized"
+            else:
+                if isinstance(error, urllib.error.URLError):
+                    error = error.reason
+                if isinstance(error, ConnectionRefusedError):
+                    server_state = "stopped"
+                elif isinstance(error, TimeoutError):
+                    server_state = "unresponsive"
+            message = {
+                "stopped": "The server is stopped.",
+                "unresponsive": "The server is not responding. Status checks will retry automatically.",
+                "unauthorized": "Control API authentication failed. No server was started or stopped.",
+                "unknown": "The server status could not be verified. No server was started or stopped.",
+            }[server_state]
             return {
-                "server": "stopped",
-                "sync": {"enabled": False, "serverStopped": True},
+                "server": server_state,
+                "statusError": message,
+                "sync": {
+                    "enabled": False,
+                    "serverStopped": server_state == "stopped",
+                    "error": message,
+                    "lastError": message,
+                },
             }
 
     root = tk.Tk()
@@ -1309,6 +1342,14 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     e_public = field("Server URL")
     e_local = field("Local URL")
 
+    access_row = ttk.Frame(det)
+    access_row.pack(fill="x", pady=(8, 0))
+    access_status = ttk.Label(access_row, text="Checking web access...",
+                              foreground="#555", wraplength=420)
+    access_status.pack(side="left")
+    access_fix = ttk.Button(access_row, text="Fix local sign-in")
+    access_fix.pack(side="right")
+
     # ---- Port (server listen + Dev Tunnel forward) ----
     prow = ttk.LabelFrame(frm, text="Port (server listen + Dev Tunnel forward)", padding=12)
     prow.pack(fill="x", pady=(10, 0))
@@ -1358,16 +1399,23 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
     statusline.pack(anchor="w", pady=(10, 0))
 
     def set_status(msg, err=False):
-        statusline.config(text=msg, foreground=("#c33" if err else "#0a7"))
+        statusline.config(text=f"Last action: {msg}", foreground=("#c33" if err else "#0a7"))
 
     def set_entry(e, val):
         e.configure(state="normal"); e.delete(0, "end")
         e.insert(0, val or ""); e.configure(state="readonly")
 
     def render(st):
-        server_up = st.get("server") == "running"
-        s_status.config(text=("\u25cf Running" if server_up else "\u25cb Stopped"),
-                        foreground=("#0a7" if server_up else "#999"))
+        server_state = st.get("server", "unknown")
+        server_up = server_state == "running"
+        server_stopped = server_state == "stopped"
+        status_text, status_color = {
+            "running": ("\u25cf Running", "#0a7"),
+            "stopped": ("\u25cb Stopped", "#999"),
+            "unresponsive": ("Not responding", "#b60"),
+            "unauthorized": ("Authentication failed", "#c33"),
+        }.get(server_state, ("Status unknown", "#b60"))
+        s_status.config(text=status_text, foreground=status_color)
         tstate = st.get("tunnel", "\u2014") if server_up else "\u2014"
         tmap = {"running": "\u25cf Public URL live", "paused": "\u23f8 Paused (stopped)",
                 "down": "\u25cb Not running", "disabled": "Disabled", "\u2014": "\u25cb \u2014"}
@@ -1377,14 +1425,21 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
         set_entry(e_public, st.get("publicUrl") or (st.get("localUrl") if server_up else ""))
         set_entry(e_local, st.get("localUrl") or _local_url())
         b = state["busy"]
-        s_start.config(state="disabled" if (server_up or b) else "normal")
+        access_mode = (st.get("webAccess") or {}).get("authMode") or getattr(cfg, "AUTH_MODE", "tunnel")
+        access_status.config(text=(
+            "Local: no sign-in. Remote: Microsoft Dev Tunnel."
+            if access_mode == "tunnel" else f"Extra web authentication: {access_mode}"
+        ), foreground="#555" if access_mode == "tunnel" else "#b60")
+        status_known = server_up or server_stopped
+        access_fix.config(state="disabled" if b or not status_known or access_mode == "tunnel" else "normal")
+        s_start.config(state="normal" if (server_stopped and not b) else "disabled")
         s_stop.config(state="normal" if (server_up and not b) else "disabled")
         s_restart.config(state="normal" if (server_up and not b) else "disabled")
         tun_ok = server_up and tunnel_enabled and tstate != "disabled"
         t_start.config(state="normal" if (tun_ok and tstate in ("paused", "down") and not b) else "disabled")
         t_stop.config(state="normal" if (tun_ok and tstate == "running" and not b) else "disabled")
         t_restart.config(state="normal" if (tun_ok and tstate in ("running", "down") and not b) else "disabled")
-        port_btn.config(state="disabled" if b else "normal")
+        port_btn.config(state="normal" if status_known and not b else "disabled")
         sync = st.get("sync") or {}
         sync_status.config(
             text=_format_sync_status(sync),
@@ -1431,7 +1486,7 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
         set_status(msg)
         for btn in (
             s_start, s_stop, s_restart, t_start, t_stop, t_restart, port_btn,
-            sync_dashboard, sync_connect, sync_now, sync_disconnect,
+            sync_dashboard, sync_connect, sync_now, sync_disconnect, access_fix,
         ):
             btn.config(state="disabled")
 
@@ -1469,35 +1524,84 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
 
     # ---- actions (run on a worker thread) ----
     def act_start_server():
+        current = fetch_status()
+        if current.get("server") == "running":
+            return True, "The server is already running. No additional instance was started."
+        if current.get("server") != "stopped":
+            return False, "Server status is uncertain. No additional instance was started. Wait for a confirmed status."
+        if _port_listening(net["port"], _phost):
+            return False, f"Port {net['port']} is still occupied. No additional instance was started."
         try:
             spawn_server()
         except Exception as exc:  # noqa: BLE001
             return False, f"Couldn't start the server: {exc}"
-        for _ in range(60):  # ~30s for a cold start
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
             time.sleep(0.5)
             if fetch_status().get("server") == "running":
                 return True, "Server started."
-        return True, "Server is starting\u2026 (still coming up)"
+        return False, "The server was launched, but readiness was not confirmed. Wait for the status check before starting again."
 
     def act_stop_server():
+        if not _port_listening(net["port"], _phost):
+            return True, "The server is already stopped."
         try:
             http("POST", "/api/control/shutdown", body={}, timeout=5)
         except Exception:  # noqa: BLE001
-            pass
-        for _ in range(20):  # ~10s for a graceful stop
-            time.sleep(0.5)
-            if fetch_status().get("server") != "running":
+            if not _port_listening(net["port"], _phost):
                 return True, "Server stopped."
-        _force_kill_server(tunnel_id)
-        time.sleep(1.0)
-        if fetch_status().get("server") != "running":
-            return True, "Server stopped (forced)."
-        return False, "Couldn't stop the server. Try ending CopilotBridgeServer.exe in Task Manager."
+            return False, "Shutdown was not confirmed. No process was force-stopped and no replacement was started."
+        deadline = time.monotonic() + 15
+        while _port_listening(net["port"], _phost):
+            if time.monotonic() >= deadline:
+                return False, "The server port is still occupied. Shutdown is not confirmed; no process was force-stopped."
+            time.sleep(0.25)
+        return True, "Server stopped."
 
     def act_restart_server():
-        act_stop_server()
-        time.sleep(1.0)
+        ok, message = act_stop_server()
+        if not ok:
+            return False, message
         return act_start_server()
+
+    def act_fix_local_signin():
+        from provisioning import configure_local_web_access, validate_local_web_access
+
+        validate_local_web_access(cfg)
+        # Only stop this authenticated instance. Never fall back to killing all
+        # server processes: another port may belong to another installation.
+        if _port_listening(net["port"]):
+            http("POST", "/api/control/shutdown", body={}, timeout=5)
+            deadline = time.monotonic() + 15
+            while _port_listening(net["port"]):
+                if time.monotonic() >= deadline:
+                    return False, "The server is still stopping. No access settings were changed; try again after it stops."
+                time.sleep(0.25)
+        configure_local_web_access(cfg)
+        cfg.AUTH_MODE = "tunnel"
+        ok, info = act_start_server()
+        if not ok:
+            return False, info
+        access = http("GET", "/api/webconfig", timeout=5)
+        if access.get("authMode") != "tunnel" or access.get("authRequired") is not False:
+            return False, "The running server still requires web authentication. Check its environment overrides."
+        webbrowser.open(_dashboard_url(), new=1)
+        return True, "Local browser sign-in removed. Remote Microsoft owner sign-in, the control key, and all data were kept."
+
+    def confirm_fix_local_signin():
+        if state["busy"]:
+            return
+        if messagebox.askyesno(
+            "Fix local sign-in",
+            "Use the recommended personal-access policy?\n\n"
+            "This PC: no browser sign-in.\n"
+            "Remote: the private Dev Tunnel still requires its owner's Microsoft account.\n"
+            "Control key, conversations, knowledge, and OneDrive data are kept.\n\n"
+            "This replaces extra application-level Entra/API-key login and starts or restarts only this local server. "
+            "Running AI tasks will be interrupted.",
+            parent=root,
+        ):
+            run_action(act_fix_local_signin, "Restoring local access and restarting this server...")
 
     def _tunnel_reason_msg(reason, detail):
         detail = (detail or "").strip()
@@ -1564,21 +1668,21 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
 
     def act_sync_connect():
         try:
-            result = http("POST", "/api/sync/connect", body={}, timeout=420)
+            result = http("POST", "/api/control/sync/connect", body={}, timeout=420)
             return True, "OneDrive connected and first sync completed. " + _format_sync_status(result)
         except Exception as exc:  # noqa: BLE001
             return False, f"OneDrive connection failed: {exc}"
 
     def act_sync_now():
         try:
-            result = http("POST", "/api/sync/run", body={}, timeout=420)
+            result = http("POST", "/api/control/sync/run", body={}, timeout=420)
             return True, "Upload + download completed. " + _format_sync_status(result)
         except Exception as exc:  # noqa: BLE001
             return False, f"OneDrive sync failed: {exc}"
 
     def act_sync_disconnect():
         try:
-            http("POST", "/api/sync/disconnect", body={}, timeout=30)
+            http("POST", "/api/control/sync/disconnect", body={}, timeout=30)
             return True, "OneDrive disconnected. Local sessions and pending uploads were kept."
         except Exception as exc:  # noqa: BLE001
             return False, f"Couldn't disconnect OneDrive: {exc}"
@@ -1668,6 +1772,7 @@ def run_control_panel(cfg, spawn_server, parent_title: str = "Copilot Bridge") -
         act_sync_now, "Uploading local changes, then downloading remote changes..."))
     sync_disconnect.config(command=lambda: run_action(
         act_sync_disconnect, "Disconnecting OneDrive..."))
+    access_fix.config(command=confirm_fix_local_signin)
 
     start_fetch()
     start_account_fetch()

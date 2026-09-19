@@ -326,7 +326,12 @@ class DevTunnel:
         """
         for attempt in range(1, retries + 1):
             try:
-                self.ensure()
+                ensure_task = asyncio.create_task(asyncio.to_thread(self.ensure))
+                try:
+                    await asyncio.shield(ensure_task)
+                except asyncio.CancelledError:
+                    await asyncio.gather(ensure_task, return_exceptions=True)
+                    raise
                 url = await self._host_once(url_timeout)
             except Exception as exc:  # noqa: BLE001
                 url = None

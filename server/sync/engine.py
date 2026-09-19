@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from session_store import SyncDependencyError
+
 from .packages import decode_events, encode_events
 
 _PACKAGE_RE = re.compile(
@@ -63,24 +65,44 @@ class SyncEngine:
 
         package_count = 0
         event_count = 0
-        blocked_devices: set[str] = set()
-        for device_id, first_seq, last_seq, expected_hash, key in candidates:
-            if device_id in blocked_devices:
-                continue
-            cursor = self.store.sync_cursor(device_id)
-            if last_seq <= cursor:
-                continue
-            if first_seq > cursor + 1:
-                blocked_devices.add(device_id)
-                continue
-            document = decode_events(await self.transport.get(key), expected_hash)
-            if document["sourceDeviceId"] != device_id:
-                raise ValueError("sync package path and source device disagree")
-            applied = self.store.apply_remote_events(
-                document["events"], device_id, int(document["lastSeq"])
-            )
-            package_count += 1
-            event_count += applied
+        pending = list(candidates)
+        while pending:
+            progress = False
+            deferred: list[tuple[str, int, int, str, str]] = []
+            dependency_errors: list[SyncDependencyError] = []
+            blocked_devices: set[str] = set()
+            for candidate in pending:
+                device_id, first_seq, last_seq, expected_hash, key = candidate
+                if device_id in blocked_devices:
+                    deferred.append(candidate)
+                    continue
+                cursor = self.store.sync_cursor(device_id)
+                if last_seq <= cursor:
+                    continue
+                if first_seq > cursor + 1:
+                    blocked_devices.add(device_id)
+                    deferred.append(candidate)
+                    continue
+                document = decode_events(await self.transport.get(key), expected_hash)
+                if document["sourceDeviceId"] != device_id:
+                    raise ValueError("sync package path and source device disagree")
+                try:
+                    applied = self.store.apply_remote_events(
+                        document["events"], device_id, int(document["lastSeq"])
+                    )
+                except SyncDependencyError as exc:
+                    blocked_devices.add(device_id)
+                    deferred.append(candidate)
+                    dependency_errors.append(exc)
+                    continue
+                package_count += 1
+                event_count += applied
+                progress = True
+            if not progress:
+                if dependency_errors:
+                    raise dependency_errors[0]
+                break
+            pending = deferred
         return SyncResult(package_count=package_count, event_count=event_count)
 
     async def sync_once(self) -> SyncResult:

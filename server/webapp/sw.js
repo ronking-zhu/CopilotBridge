@@ -1,10 +1,11 @@
 // Minimal service worker: cache the app shell, never cache API calls.
-const CACHE = 'copilot-bridge-v22';
-const SHELL = ['/', '/index.html', '/icon.svg', '/manifest.webmanifest', '/vendor/msal-browser.min.js'];
+const CACHE = 'copilot-bridge-v267-dashboard-controls';
+const SHELL = ['/', '/index.html', '/v23.css', '/v23.js', '/icon.svg', '/manifest.webmanifest', '/vendor/msal-browser.min.js'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}));
-  self.skipWaiting();
+  e.waitUntil(
+    caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {

@@ -7,6 +7,10 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
+
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 _SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SERVER_DIR not in sys.path:
@@ -57,6 +61,62 @@ class FakeDiscovery:
 
 def assistant(text: str, ts: float) -> dict:
     return {"role": "assistant", "text": text, "ts": ts}
+
+
+async def assert_responsive_discovery(store) -> None:
+    loop = asyncio.get_running_loop()
+    event_loop_thread = threading.get_ident()
+
+    async def health(_request):
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_get("/health", health)
+    async with TestClient(TestServer(app)) as client:
+        for blocked_method in ("list", "read"):
+            entered = asyncio.Event()
+            release = threading.Event()
+
+            class BlockingDiscovery(FakeDiscovery):
+                blocked_calls = 0
+
+                def block(self, method):
+                    if method != blocked_method:
+                        return
+                    self.blocked_calls += 1
+                    loop.call_soon_threadsafe(entered.set)
+                    assert threading.get_ident() != event_loop_thread, "Native discovery blocked the HTTP event loop"
+                    assert release.wait(3), "Slow-discovery fixture was not released"
+
+                def list_sessions(self):
+                    self.block("list")
+                    return super().list_sessions()
+
+                def read_session_key(self, source_key):
+                    self.block("read")
+                    return super().read_session_key(source_key)
+
+            discovery = BlockingDiscovery()
+            discovery.sessions["cli:slow-fixture"] = {
+                "nativeId": "slow-fixture", "source": "cli",
+                "title": "Synthetic slow discovery", "messages": [],
+            }
+            watcher = SessionWatcher(store, discovery=discovery)
+            scans = [asyncio.create_task(watcher.scan_once())]
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                assert not scans[0].done(), "Discovery must remain pending without blocking HTTP"
+                scans.append(asyncio.create_task(watcher.scan_once()))
+                response = await asyncio.wait_for(client.get("/health"), timeout=0.5)
+                assert response.status == 200
+                assert await response.json() == {"ok": True}
+                assert discovery.blocked_calls == 1, "Overlapping scans must be serialized"
+                assert not any(scan.done() for scan in scans)
+            finally:
+                release.set()
+                results = await asyncio.gather(*scans)
+            assert all(result.errors == 0 for result in results)
+            assert discovery.blocked_calls == 2
 
 
 async def main() -> None:
@@ -134,6 +194,7 @@ async def main() -> None:
             assert store.inbox_unread_count() == 1
             store.mark_all_inbox_seen()
             assert store.inbox_unread_count() == 0
+            await assert_responsive_discovery(store)
         finally:
             store.close()
     print("ALL SESSION WATCHER TESTS PASSED")

@@ -10,7 +10,7 @@
 ;   OutputDir   - where to drop the setup .exe (dist)
 
 #ifndef AppVersion
-  #define AppVersion "1.2.0"
+  #define AppVersion "2.6.7"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\CopilotBridgeServer"
@@ -159,10 +159,9 @@ begin
   begin
     if CompareVersions(Installed, '{#AppVersion}') > 0 then
     begin
-      if MsgBox('A newer version (' + Installed + ') is already installed. ' +
-                'Install the older {#AppVersion} anyway?',
-                mbConfirmation, MB_YESNO) = IDNO then
-        Result := False;
+      MsgBox('A newer version (' + Installed + ') is already installed. ' +
+             'Uninstall it before installing {#AppVersion}.', mbError, MB_OK);
+      Result := False;
     end;
   end;
 end;

@@ -9,6 +9,9 @@ Designed to be reached directly from a phone through a Dev Tunnel:
     GET  /api/webconfig                                      -> {authRequired}
     GET/PATCH /api/settings                                  -> user settings
     GET  /api/dashboard                                     -> inbox + active job summary
+    GET/POST /api/knowledge                                 -> knowledge list / create
+    GET/PATCH/DELETE /api/knowledge/{id}                    -> versioned knowledge CRUD
+    POST /api/knowledge/{id}/versions                       -> append an evidence-backed version
     GET/PATCH /api/inbox*                                   -> persistent attention inbox
     POST   /api/sessions  {title?}                           -> 201 session summary
     GET    /api/sessions                                     -> [session summaries]
@@ -17,7 +20,8 @@ Designed to be reached directly from a phone through a Dev Tunnel:
     POST   /api/sessions/{id}/sync                           -> reconcile with the Copilot CLI's
                                                                  own transcript, then full session
     DELETE /api/sessions/{id}                                -> {deleted: true}
-    PATCH  /api/sessions/{id} {title}                        -> session summary
+    PATCH  /api/sessions/{id} {title,isFavorite,isPinned,project,labels}
+                                                               -> session summary
     GET  /api/copilot-sessions                               -> [Copilot CLI native session summaries]
     GET  /api/copilot-sessions/{id}                          -> full Copilot session (with messages)
     POST /api/copilot-sessions/{id}/import                   -> import into bridge store (201 summary)
@@ -39,6 +43,7 @@ import asyncio
 import base64
 import binascii
 import collections
+from functools import partial
 import json
 import os
 import re
@@ -48,6 +53,9 @@ import uuid
 from aiohttp import web
 
 import copilot_sessions
+from knowledge_extractor import (
+    KnowledgeExtractionError, parse_extraction_output, parse_mind_map_output,
+)
 from paths import app_base_dir, resource_dir
 from session_store import SessionStore, merge_message_lists
 from session_watcher import SessionWatcher
@@ -88,7 +96,7 @@ def _authorized(request: web.Request, token: str, allow_query: bool = False) -> 
     return provided == token
 
 
-def setup_web_routes(app: web.Application, config, runner):
+def setup_web_routes(app: web.Application, config, runner, knowledge_extractor=None):
     """Register the chat API + static web app routes on an existing aiohttp app."""
     jobs: dict = {}
     locks: dict = {}
@@ -97,6 +105,15 @@ def setup_web_routes(app: web.Application, config, runner):
     # runs one turn per session at a time (concurrent `--session-id` runs would
     # corrupt the conversation), and each waiter can see its position in line.
     queues: dict = {}
+    knowledge_locks: dict = {}
+    knowledge_map_lock = asyncio.Lock()
+    knowledge_generation_tasks: dict[str, asyncio.Task] = {}
+
+    if knowledge_extractor is None:
+        from knowledge_extractor import UnavailableKnowledgeExtractor
+        knowledge_extractor = UnavailableKnowledgeExtractor(
+            "knowledge extractor was not configured"
+        )
 
     # Request authorization: shared API key and/or Microsoft Entra ID sign-in,
     # per config.AUTH_MODE (default 'apikey' = unchanged legacy behaviour).
@@ -175,6 +192,7 @@ def setup_web_routes(app: web.Application, config, runner):
     app["session_store"] = store
     app["session_watcher"] = watcher
     app["sync_service"] = sync_service
+    app["knowledge_generation_tasks"] = knowledge_generation_tasks
 
     async def _start_services(_app: web.Application) -> None:
         if watcher_enabled:
@@ -198,6 +216,11 @@ def setup_web_routes(app: web.Application, config, runner):
                     await sync_task
                 except asyncio.CancelledError:
                     pass
+        generation_tasks = list(knowledge_generation_tasks.values())
+        for generation_task in generation_tasks:
+            generation_task.cancel()
+        if generation_tasks:
+            await asyncio.gather(*generation_tasks, return_exceptions=True)
         store.close()
 
     app.on_startup.append(_start_services)
@@ -506,7 +529,7 @@ def setup_web_routes(app: web.Application, config, runner):
         })
 
     async def webconfig(request: web.Request) -> web.Response:  # noqa: ARG001
-        return web.json_response(authn.describe())
+        return web.json_response(authn.describe(), headers={"Cache-Control": "no-store"})
 
     async def settings_get(request: web.Request) -> web.Response:
         if not _authorized(request, config.CHAT_API_TOKEN):
@@ -562,8 +585,8 @@ def setup_web_routes(app: web.Application, config, runner):
             status=503,
         )
 
-    async def sync_status(request: web.Request) -> web.Response:
-        if not _authorized(request, config.CHAT_API_TOKEN):
+    async def sync_status(request: web.Request, *, control: bool = False) -> web.Response:
+        if not (authn.check_control(request, host_key_only=True) if control else _authorized(request)):
             return web.json_response({"error": "unauthorized"}, status=401)
         if sync_service is None:
             return web.json_response({
@@ -573,8 +596,8 @@ def setup_web_routes(app: web.Application, config, runner):
             })
         return web.json_response(sync_service.describe())
 
-    async def sync_connect(request: web.Request) -> web.Response:
-        if not _authorized(request, config.CHAT_API_TOKEN):
+    async def sync_connect(request: web.Request, *, control: bool = False) -> web.Response:
+        if not (authn.check_control(request, host_key_only=True) if control else _authorized(request)):
             return web.json_response({"error": "unauthorized"}, status=401)
         if sync_service is None:
             return _sync_unavailable()
@@ -583,8 +606,8 @@ def setup_web_routes(app: web.Application, config, runner):
         except Exception as exc:  # noqa: BLE001 - return actionable auth/Graph error
             return web.json_response({"error": str(exc)}, status=502)
 
-    async def sync_run(request: web.Request) -> web.Response:
-        if not _authorized(request, config.CHAT_API_TOKEN):
+    async def sync_run(request: web.Request, *, control: bool = False) -> web.Response:
+        if not (authn.check_control(request, host_key_only=True) if control else _authorized(request)):
             return web.json_response({"error": "unauthorized"}, status=401)
         if sync_service is None:
             return _sync_unavailable()
@@ -593,8 +616,8 @@ def setup_web_routes(app: web.Application, config, runner):
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"error": str(exc)}, status=502)
 
-    async def sync_disconnect(request: web.Request) -> web.Response:
-        if not _authorized(request, config.CHAT_API_TOKEN):
+    async def sync_disconnect(request: web.Request, *, control: bool = False) -> web.Response:
+        if not (authn.check_control(request, host_key_only=True) if control else _authorized(request)):
             return web.json_response({"error": "unauthorized"}, status=401)
         if sync_service is None:
             return _sync_unavailable()
@@ -640,6 +663,34 @@ def setup_web_routes(app: web.Application, config, runner):
         if not _authorized(request, config.CHAT_API_TOKEN):
             return web.json_response({"error": "unauthorized"}, status=401)
         return web.json_response({"updated": store.mark_all_inbox_seen()})
+
+    async def inbox_complete_all(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"updated": store.complete_all_inbox_items()})
+
+    async def inbox_remind(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("body must be an object")
+            if "remindAt" in body:
+                remind_at = float(body["remindAt"])
+            else:
+                minutes = int(body.get("minutes", 60))
+                if minutes < 1 or minutes > 525600:
+                    raise ValueError("minutes must be between 1 and 525600")
+                remind_at = time.time() + minutes * 60
+            item = store.remind_inbox_item(request.match_info["id"], remind_at)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except Exception:  # noqa: BLE001
+            return web.json_response({"error": "invalid json"}, status=400)
+        if item is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response(item)
 
     async def inbox_scan(request: web.Request) -> web.Response:
         if not _authorized(request, config.CHAT_API_TOKEN):
@@ -732,6 +783,421 @@ def setup_web_routes(app: web.Application, config, runner):
             return web.json_response({"error": str(exc)}, status=400)
         return web.json_response(turns)
 
+    async def knowledge_list(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            items = store.list_knowledge_items(
+                query=request.query.get("query", ""),
+                status=request.query.get("status", ""),
+                knowledge_type=request.query.get("type", ""),
+                project=request.query.get("project", ""),
+                conversation_id=request.query.get("conversationId", ""),
+            )
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"items": items, "count": len(items)})
+
+    async def session_knowledge_list(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        conversation_id = request.match_info["id"]
+        if store.get(conversation_id) is None:
+            return web.json_response({"error": "not found"}, status=404)
+        items = store.list_knowledge_items(conversation_id=conversation_id)
+        return web.json_response({"items": items, "count": len(items)})
+
+    async def _generate_knowledge_map(
+        *, force: bool, max_conversations: int, focus_conversation_id: str = "",
+    ) -> dict:
+        async with knowledge_map_lock:
+            map_version = getattr(
+                knowledge_extractor, "map_extractor_version",
+                f"{knowledge_extractor.extractor_version}:map-v1",
+            )
+            prepared = store.prepare_knowledge_map(
+                map_version,
+                max_chars=min(
+                    getattr(config, "KNOWLEDGE_MAP_MAX_CHARS", 22000),
+                    getattr(knowledge_extractor, "max_map_input_chars", 22000),
+                ),
+                max_conversations=max_conversations,
+                focus_conversation_id=focus_conversation_id,
+            )
+            if not prepared["conversations"]:
+                raise ValueError("没有可用于生成思维导图的会话历史")
+            if prepared["cached"] and not force:
+                return {
+                    "map": prepared["cachedMap"], "cached": True,
+                    "selectedConversationCount": prepared["selectedConversationCount"],
+                    "eligibleConversationCount": prepared["eligibleConversationCount"],
+                    "extractor": knowledge_extractor.describe(),
+                }
+            for attempt in range(2):
+                try:
+                    raw = await knowledge_extractor.extract_map(
+                        prepared["conversations"]
+                    )
+                    payload = parse_mind_map_output(
+                        raw, set(prepared["sourceMessageIds"]),
+                        max_nodes=getattr(knowledge_extractor, "max_map_nodes", 48),
+                    )
+                    break
+                except KnowledgeExtractionError:
+                    if attempt == 1:
+                        raise
+            mind_map = store.save_knowledge_map(
+                payload, input_digest=prepared["inputDigest"],
+                extractor_version=map_version,
+                source_message_ids=prepared["sourceMessageIds"],
+                source_conversation_count=prepared["selectedConversationCount"],
+                map_id=prepared["mapId"],
+            )
+            if prepared["mapId"] != "history":
+                store.save_knowledge_map(
+                    payload, input_digest=prepared["inputDigest"],
+                    extractor_version=map_version,
+                    source_message_ids=prepared["sourceMessageIds"],
+                    source_conversation_count=prepared["selectedConversationCount"],
+                )
+            return {
+                "map": mind_map, "cached": False,
+                "selectedConversationCount": prepared["selectedConversationCount"],
+                "eligibleConversationCount": prepared["eligibleConversationCount"],
+                "extractor": knowledge_extractor.describe(),
+            }
+
+    async def knowledge_map_get(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        conversation_id = request.query.get("conversationId", "").strip()
+        try:
+            map_id = f"conversation-{store._norm_id(conversation_id)}" \
+                if conversation_id else "history"
+            mind_map = store.get_knowledge_map(map_id)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"map": mind_map})
+
+    async def knowledge_map_generate(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if not getattr(knowledge_extractor, "available", False):
+            return web.json_response({
+                "error": getattr(knowledge_extractor, "reason", "extractor unavailable"),
+                "extractor": knowledge_extractor.describe(),
+            }, status=503)
+        try:
+            body = await request.json() if request.can_read_body else {}
+            if not isinstance(body, dict):
+                raise ValueError("body must be an object")
+            unknown = set(body) - {
+                "force", "maxConversations", "focusConversationId",
+            }
+            if unknown:
+                raise ValueError(
+                    f"unknown mind map field(s): {', '.join(sorted(unknown))}"
+                )
+            force = body.get("force", False)
+            if not isinstance(force, bool):
+                raise ValueError("force must be a boolean")
+            max_conversations = int(body.get(
+                "maxConversations",
+                getattr(config, "KNOWLEDGE_MAP_MAX_CONVERSATIONS", 48),
+            ))
+            focus_conversation_id = body.get("focusConversationId", "")
+            if not isinstance(focus_conversation_id, str):
+                raise ValueError("focusConversationId must be a string")
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        try:
+            result = await _generate_knowledge_map(
+                force=force, max_conversations=max_conversations,
+                focus_conversation_id=focus_conversation_id,
+            )
+            return web.json_response(result)
+        except KnowledgeExtractionError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
+    async def knowledge_create(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("body must be an object")
+            allowed = {
+                "type", "title", "bodyMarkdown", "evidenceMessageIds", "status",
+                "project", "labels", "confidence", "extractorVersion", "inputDigest",
+            }
+            unknown = set(body) - allowed
+            if unknown:
+                raise ValueError(
+                    f"unknown knowledge field(s): {', '.join(sorted(unknown))}"
+                )
+            item = store.create_knowledge_item(
+                knowledge_type=body.get("type"), title=body.get("title"),
+                body_markdown=body.get("bodyMarkdown"),
+                evidence_message_ids=body.get("evidenceMessageIds"),
+                status=body.get("status", "draft"), project=body.get("project", ""),
+                labels=body.get("labels") or [], confidence=body.get("confidence", ""),
+                extractor_version=body.get("extractorVersion", "manual-v1"),
+                input_digest=body.get("inputDigest", ""),
+            )
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except Exception:  # noqa: BLE001
+            return web.json_response({"error": "invalid json"}, status=400)
+        return web.json_response(item, status=201)
+
+    async def knowledge_get(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        item = store.get_knowledge_item(request.match_info["id"])
+        if item is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response(item)
+
+    async def knowledge_update(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("body must be an object")
+            item = store.update_knowledge_item(request.match_info["id"], body)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except Exception:  # noqa: BLE001
+            return web.json_response({"error": "invalid json"}, status=400)
+        if item is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response(item)
+
+    async def knowledge_add_version(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("body must be an object")
+            allowed = {
+                "bodyMarkdown", "evidenceMessageIds", "confidence",
+                "extractorVersion", "inputDigest",
+            }
+            unknown = set(body) - allowed
+            if unknown:
+                raise ValueError(
+                    f"unknown knowledge version field(s): {', '.join(sorted(unknown))}"
+                )
+            item = store.add_knowledge_version(
+                request.match_info["id"], body_markdown=body.get("bodyMarkdown"),
+                evidence_message_ids=body.get("evidenceMessageIds"),
+                confidence=body.get("confidence", ""),
+                extractor_version=body.get("extractorVersion", "manual-v1"),
+                input_digest=body.get("inputDigest", ""),
+            )
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except Exception:  # noqa: BLE001
+            return web.json_response({"error": "invalid json"}, status=400)
+        if item is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response(item, status=201)
+
+    async def knowledge_delete(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if store.delete_knowledge_item(request.match_info["id"]):
+            return web.json_response({"deleted": True})
+        return web.json_response({"error": "not found"}, status=404)
+
+    async def _extract_knowledge(conversation_id: str) -> dict:
+        lock = knowledge_locks.setdefault(conversation_id, asyncio.Lock())
+        async with lock:
+            batch = store.prepare_knowledge_extraction(
+                conversation_id, knowledge_extractor.extractor_version,
+                max_chars=min(
+                    getattr(config, "KNOWLEDGE_EXTRACTION_MAX_CHARS", 45000),
+                    getattr(knowledge_extractor, "max_input_chars", 45000),
+                ),
+                max_messages=getattr(config, "KNOWLEDGE_EXTRACTION_MAX_MESSAGES", 120),
+            )
+            if batch["noNewMessages"] or batch["cached"]:
+                return {
+                    "items": batch["cachedItems"], "cached": True,
+                    "noNewMessages": batch["noNewMessages"],
+                    "processedMessageCount": batch["processedMessageCount"],
+                    "remainingMessageCount": batch["remainingMessageCount"],
+                    "extractor": knowledge_extractor.describe(),
+                }
+            raw = await knowledge_extractor.extract(
+                batch["messages"], batch["existingItems"]
+            )
+            candidates = parse_extraction_output(
+                raw, set(batch["sourceMessageIds"]),
+                max_items=getattr(
+                    knowledge_extractor, "max_items",
+                    max(1, min(int(getattr(
+                        config, "KNOWLEDGE_EXTRACTION_MAX_ITEMS", 12
+                    )), 30)),
+                ),
+            )
+            result = store.apply_knowledge_extraction(
+                conversation_id, knowledge_extractor.extractor_version,
+                batch["inputDigest"], batch["sourceMessageIds"], candidates,
+            )
+            return {
+                **result, "noNewMessages": False,
+                "processedMessageCount": len(batch["sourceMessageIds"]),
+                "remainingMessageCount": batch["remainingMessageCount"],
+                "extractor": knowledge_extractor.describe(),
+            }
+
+    async def knowledge_extract(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        conversation_id = request.match_info["id"]
+        if store.get(conversation_id) is None:
+            return web.json_response({"error": "not found"}, status=404)
+        if not getattr(knowledge_extractor, "available", False):
+            return web.json_response({
+                "error": getattr(knowledge_extractor, "reason", "extractor unavailable"),
+                "extractor": knowledge_extractor.describe(),
+            }, status=503)
+        try:
+            return web.json_response(await _extract_knowledge(conversation_id))
+        except KnowledgeExtractionError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
+    async def _run_knowledge_generation(
+        conversation_id: str, max_conversations: int,
+    ) -> None:
+        generated_item_ids: set[str] = set()
+        processed_message_count = 0
+        remaining_message_count = 0
+        try:
+            store.update_knowledge_generation_job(
+                conversation_id, status="running", phase="extracting"
+            )
+            for _batch_number in range(20):
+                extraction = await _extract_knowledge(conversation_id)
+                generated_item_ids.update(
+                    item["id"] for item in extraction.get("items") or [] if item.get("id")
+                )
+                processed_message_count += int(
+                    extraction.get("processedMessageCount") or 0
+                )
+                remaining_message_count = int(
+                    extraction.get("remainingMessageCount") or 0
+                )
+                store.update_knowledge_generation_job(
+                    conversation_id, status="running", phase="extracting",
+                    processed_message_count=processed_message_count,
+                    remaining_message_count=remaining_message_count,
+                    generated_item_count=len(generated_item_ids),
+                )
+                if not remaining_message_count:
+                    break
+            if remaining_message_count:
+                raise KnowledgeExtractionError(
+                    "knowledge extraction exceeded the 20-batch safety limit"
+                )
+            store.update_knowledge_generation_job(
+                conversation_id, status="running", phase="mapping",
+                processed_message_count=processed_message_count,
+                remaining_message_count=0,
+                generated_item_count=len(generated_item_ids),
+            )
+            map_result = await _generate_knowledge_map(
+                force=True, max_conversations=max_conversations,
+                focus_conversation_id=conversation_id,
+            )
+            store.update_knowledge_generation_job(
+                conversation_id, status="completed", phase="completed",
+                processed_message_count=processed_message_count,
+                remaining_message_count=0,
+                generated_item_count=len(generated_item_ids),
+                result_map_id=map_result["map"]["id"],
+            )
+        except asyncio.CancelledError:
+            store.update_knowledge_generation_job(
+                conversation_id, status="failed", phase="failed",
+                processed_message_count=processed_message_count,
+                remaining_message_count=remaining_message_count,
+                generated_item_count=len(generated_item_ids),
+                error="Generation cancelled during server shutdown.",
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001 - status must retain background failures
+            store.update_knowledge_generation_job(
+                conversation_id, status="failed", phase="failed",
+                processed_message_count=processed_message_count,
+                remaining_message_count=remaining_message_count,
+                generated_item_count=len(generated_item_ids), error=str(exc),
+            )
+        finally:
+            current = asyncio.current_task()
+            if knowledge_generation_tasks.get(conversation_id) is current:
+                knowledge_generation_tasks.pop(conversation_id, None)
+
+    async def knowledge_generation_start(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        conversation_id = request.match_info["id"]
+        if store.get(conversation_id) is None:
+            return web.json_response({"error": "not found"}, status=404)
+        if not getattr(knowledge_extractor, "available", False):
+            return web.json_response({
+                "error": getattr(knowledge_extractor, "reason", "extractor unavailable"),
+                "extractor": knowledge_extractor.describe(),
+            }, status=503)
+        try:
+            body = await request.json() if request.can_read_body else {}
+            if not isinstance(body, dict):
+                raise ValueError("body must be an object")
+            unknown = set(body) - {"maxConversations"}
+            if unknown:
+                raise ValueError(
+                    f"unknown generation field(s): {', '.join(sorted(unknown))}"
+                )
+            max_conversations = int(body.get(
+                "maxConversations",
+                getattr(config, "KNOWLEDGE_MAP_MAX_CONVERSATIONS", 48),
+            ))
+            job, created = store.begin_knowledge_generation_job(
+                conversation_id, max_conversations=max_conversations,
+            )
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        if created:
+            knowledge_generation_tasks[conversation_id] = asyncio.create_task(
+                _run_knowledge_generation(conversation_id, job["maxConversations"])
+            )
+        return web.json_response(
+            {"accepted": created, "job": job}, status=202 if created else 200
+        )
+
+    async def knowledge_generation_get(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        conversation_id = request.match_info["id"]
+        if store.get(conversation_id) is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({
+            "job": store.get_knowledge_generation_job(conversation_id)
+        })
+
+    async def knowledge_generation_list(request: web.Request) -> web.Response:
+        if not _authorized(request, config.CHAT_API_TOKEN):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        jobs_list = store.list_knowledge_generation_jobs()
+        return web.json_response({"jobs": jobs_list, "count": len(jobs_list)})
+
     async def sessions_sync(request: web.Request) -> web.Response:
         """Reconcile a session with the Copilot CLI's own on-disk transcript, then
         return the full merged session.
@@ -800,15 +1266,31 @@ def setup_web_routes(app: web.Application, config, runner):
             return web.json_response({"deleted": True})
         return web.json_response({"error": "not found"}, status=404)
 
-    async def sessions_rename(request: web.Request) -> web.Response:
+    async def sessions_update(request: web.Request) -> web.Response:
         if not _authorized(request, config.CHAT_API_TOKEN):
             return web.json_response({"error": "unauthorized"}, status=401)
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
             return web.json_response({"error": "invalid json"}, status=400)
-        title = (body.get("title") or "").strip()
-        session = store.rename(request.match_info["id"], title)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "body must be an object"}, status=400)
+        allowed = {"title", "isFavorite", "isPinned", "project", "labels"}
+        unknown = set(body) - allowed
+        if unknown:
+            return web.json_response({
+                "error": f"unknown session field(s): {', '.join(sorted(unknown))}"
+            }, status=400)
+        if not body:
+            return web.json_response({"error": "at least one field is required"}, status=400)
+        session_id = request.match_info["id"]
+        session = store.get(session_id)
+        if session is None:
+            return web.json_response({"error": "not found"}, status=404)
+        try:
+            session = store.update_metadata(session_id, body)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
         if session is None:
             return web.json_response({"error": "not found"}, status=404)
         return web.json_response(store.summarize(session))
@@ -827,14 +1309,15 @@ def setup_web_routes(app: web.Application, config, runner):
         if not os.path.isfile(path):
             return web.Response(status=404, text="not found")
         try:
-            html = open(path, encoding="utf-8").read()
+            with open(path, encoding="utf-8") as file:
+                html = file.read()
             key = config.CHAT_API_TOKEN or ""
-            # Only hand the key to the page when the tunnel itself enforces a
-            # Microsoft sign-in (private/tenant/org). In 'anonymous' mode the key is
-            # the only gate, so embedding it would defeat it — require manual entry.
+            # Only the tunnel owner may receive legacy browser credentials.
+            # Tenant/org tunnels admit other users; never expose the host control
+            # key to them (or to an anonymous tunnel).
             tunnel_auth = (getattr(config, "TUNNEL_AUTH", "private") or "private").strip().lower()
             auth_mode = (getattr(config, "AUTH_MODE", "tunnel") or "tunnel").strip().lower()
-            if key and tunnel_auth != "anonymous" and auth_mode in ("apikey", "both"):
+            if key and tunnel_auth == "private" and auth_mode in ("apikey", "both"):
                 inject = ("<script>window.__CB_KEY="
                           + json.dumps(key) + ";</script>")
                 html = html.replace("</head>", inject + "</head>", 1)
@@ -930,12 +1413,20 @@ def setup_web_routes(app: web.Application, config, runner):
     app.router.add_get("/api/dashboard", dashboard_get)
     app.router.add_get("/api/inbox", inbox_list)
     app.router.add_patch("/api/inbox/{id}", inbox_update)
+    app.router.add_post("/api/inbox/{id}/remind", inbox_remind)
     app.router.add_post("/api/inbox/mark-all-seen", inbox_mark_all_seen)
+    app.router.add_post("/api/inbox/complete-all", inbox_complete_all)
     app.router.add_post("/api/inbox/scan", inbox_scan)
     app.router.add_get("/api/sync/status", sync_status)
     app.router.add_post("/api/sync/connect", sync_connect)
     app.router.add_post("/api/sync/run", sync_run)
     app.router.add_post("/api/sync/disconnect", sync_disconnect)
+    # The native panel uses the host control credential, even in Entra-only web
+    # mode. Public sync endpoints retain their existing web authentication policy.
+    app.router.add_get("/api/control/sync/status", partial(sync_status, control=True))
+    app.router.add_post("/api/control/sync/connect", partial(sync_connect, control=True))
+    app.router.add_post("/api/control/sync/run", partial(sync_run, control=True))
+    app.router.add_post("/api/control/sync/disconnect", partial(sync_disconnect, control=True))
     app.router.add_get("/api/uploads/{sid}/{name}", uploads_get)
 
     # Session management
@@ -943,10 +1434,29 @@ def setup_web_routes(app: web.Application, config, runner):
     app.router.add_get("/api/sessions", sessions_list)
     app.router.add_get("/api/history", history_list)
     app.router.add_get("/api/sessions/{id}/turns", sessions_turns)
+    app.router.add_get("/api/sessions/{id}/knowledge", session_knowledge_list)
+    app.router.add_get(
+        "/api/sessions/{id}/knowledge/generation", knowledge_generation_get
+    )
+    app.router.add_post(
+        "/api/sessions/{id}/knowledge/generate", knowledge_generation_start
+    )
+    app.router.add_post("/api/sessions/{id}/knowledge/extract", knowledge_extract)
     app.router.add_get("/api/sessions/{id}", sessions_get)
     app.router.add_post("/api/sessions/{id}/sync", sessions_sync)
     app.router.add_delete("/api/sessions/{id}", sessions_delete)
-    app.router.add_patch("/api/sessions/{id}", sessions_rename)
+    app.router.add_patch("/api/sessions/{id}", sessions_update)
+
+    # Versioned personal knowledge with message-level evidence
+    app.router.add_get("/api/knowledge/generation-jobs", knowledge_generation_list)
+    app.router.add_get("/api/knowledge/map", knowledge_map_get)
+    app.router.add_post("/api/knowledge/map/generate", knowledge_map_generate)
+    app.router.add_get("/api/knowledge", knowledge_list)
+    app.router.add_post("/api/knowledge", knowledge_create)
+    app.router.add_post("/api/knowledge/{id}/versions", knowledge_add_version)
+    app.router.add_get("/api/knowledge/{id}", knowledge_get)
+    app.router.add_patch("/api/knowledge/{id}", knowledge_update)
+    app.router.add_delete("/api/knowledge/{id}", knowledge_delete)
 
     # Copilot CLI native session discovery + import
     app.router.add_get("/api/copilot-sessions", copilot_sessions_list)
@@ -959,6 +1469,8 @@ def setup_web_routes(app: web.Application, config, runner):
     app.router.add_get("/index.html", _index)
     app.router.add_get("/manifest.webmanifest", _file("manifest.webmanifest"))
     app.router.add_get("/sw.js", _file("sw.js", headers={"Service-Worker-Allowed": "/"}))
+    app.router.add_get("/v23.css", _file("v23.css"))
+    app.router.add_get("/v23.js", _file("v23.js"))
     app.router.add_get("/icon.svg", _file("icon.svg"))
     # Bundled MSAL.js (browser) for the optional Microsoft Entra ID sign-in.
     app.router.add_get("/vendor/msal-browser.min.js", _file("vendor/msal-browser.min.js"))

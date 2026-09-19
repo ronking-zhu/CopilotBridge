@@ -12,7 +12,8 @@ platform to that release.
   - **PATCH** — backward-compatible fixes only.
 - One git tag per release: `vX.Y.Z` (annotated). The tag is the source of truth; a GitHub
   Release is created from it.
-- Keep `clients/windows/CopilotBridgeClient.csproj` `<Version>` in step with the release.
+- Keep `server/version.py`, the installer fallback, build-script default, PWA cache key,
+  and every shipping client manifest in step with the release.
 
 ## Release artifact naming
 
@@ -66,8 +67,14 @@ The app server ships as a one-file Windows installer built with Inno Setup:
 ```powershell
 # Builds the self-contained server (onedir) then compiles the installer.
 .\scripts\build-installer.ps1 -Version 1.2.0
-# -> dist\CopilotBridgeServer-1.2.0-setup.exe
+# -> dist\copilotbridgeserver-ms-1.2.0-setup.exe
 ```
+
+Published installer artifacts are immutable. Never replace an existing versioned
+`*-setup.exe` locally or on a GitHub Release. The build script refuses before building
+the server, including with `-SkipBuild`, when the destination already exists. Increment
+`-Version` (normally PATCH) and publish the newly named artifact. Keep the shared Inno
+Setup `AppId`; it lets newer versions upgrade the installed application in place.
 
 Upgrade / uninstall behaviour (installer/CopilotBridgeServer.iss):
 
@@ -76,12 +83,13 @@ Upgrade / uninstall behaviour (installer/CopilotBridgeServer.iss):
   "Programs and Features" entry instead of creating a second one. `[InstallDelete]`
   wipes the old `_internal\` payload first so removed files don't linger, and the
   running server/tunnel are stopped (`taskkill` + `CloseApplications`) so locked
-  files can be replaced. Installing an **older** version over a newer one is blocked
-  with a confirmation.
+  files can be replaced. Installing an **older** version over a newer one is blocked;
+  explicitly uninstall the newer version first when a rollback is unavoidable.
 - **Uninstall from Control Panel** — the installer registers a normal uninstaller;
   uninstalling stops the server/tunnel, removes the program folder, and strips the
   install dir from the system PATH. User data in `%LOCALAPPDATA%\CopilotBridge`
   (the generated API key, sessions) is intentionally left in place.
-- **Bump the version** by passing a new `-Version` to `build-installer.ps1`; tag and
-  release the resulting `*-setup.exe` like any other asset.
+- **Bump every release surface** before passing the same new `-Version` to
+  `build-installer.ps1`. The build verifies that the source and frozen payload versions
+  match, then tag and release the resulting `*-setup.exe` like any other asset.
 
